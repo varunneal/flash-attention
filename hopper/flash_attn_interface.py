@@ -43,7 +43,8 @@ def _flash_attn_forward(
         v_descale,
         softmax_scale,
         causal,
-        window_size=(-1, -1),
+        window_size_left=None,
+        window_size_right=None,
         attention_chunk=0,
         softcap=0.0,
         rotary_interleaved=True,
@@ -88,8 +89,8 @@ def _flash_attn_forward(
         v_descale,
         softmax_scale,
         causal,
-        window_size[0],
-        window_size[1],
+        window_size_left,
+        window_size_right,
         attention_chunk,
         softcap,
         rotary_interleaved,
@@ -119,7 +120,8 @@ def _flash_attn_backward(
         dv,
         softmax_scale,
         causal,
-        window_size=(-1, -1),
+        window_size_left=None,
+        window_size_right=None,
         softcap=0.0,
         deterministic=False,
         sm_margin=0,
@@ -144,8 +146,8 @@ def _flash_attn_backward(
         max_seqlen_k,
         softmax_scale,
         causal,
-        window_size[0],
-        window_size[1],
+        window_size_left,
+        window_size_right,
         softcap,
         deterministic,
         sm_margin,
@@ -241,13 +243,14 @@ class FlashAttnQKVPackedFunc(torch.autograd.Function):
             dv,
             ctx.softmax_scale,
             ctx.causal,
-            ctx.window_size,
+            ctx.window_size_left,
+            ctx.window_size_right,
             ctx.softcap,
             ctx.deterministic,
             ctx.sm_margin,
         )
         dqkv = dqkv[..., : dout.shape[-1]]  # We could have padded the head dimension
-        return dqkv, None, None, None, None, None, None, None, None, None, None, None
+        return dqkv, None, None, None, None, None, None, None, None, None, None, None, None
 
 
 class FlashAttnFunc(torch.autograd.Function):
@@ -262,7 +265,8 @@ class FlashAttnFunc(torch.autograd.Function):
         causal,
         qv=None,
         q_descale=None, k_descale=None, v_descale=None,
-        window_size=(-1, -1),
+        window_size_left=None,
+        window_size_right=None,
         attention_chunk=0,
         softcap=0.0,
         num_splits=1,
@@ -288,7 +292,8 @@ class FlashAttnFunc(torch.autograd.Function):
             q_descale, k_descale, v_descale,
             softmax_scale,
             causal=causal,
-            window_size=window_size,
+            window_size_left=window_size_left,
+            window_size_right=window_size_right,
             attention_chunk=attention_chunk,
             softcap=softcap,
             num_splits=num_splits,
@@ -299,7 +304,8 @@ class FlashAttnFunc(torch.autograd.Function):
         ctx.save_for_backward(q, k, v, out, softmax_lse)
         ctx.softmax_scale = softmax_scale
         ctx.causal = causal
-        ctx.window_size = window_size
+        ctx.window_size_left = window_size_left
+        ctx.window_size_right = window_size_right
         ctx.attention_chunk = attention_chunk
         ctx.softcap = softcap
         ctx.deterministic = deterministic
@@ -326,7 +332,8 @@ class FlashAttnFunc(torch.autograd.Function):
             dv,
             ctx.softmax_scale,
             ctx.causal,
-            ctx.window_size,
+            ctx.window_size_left,
+            ctx.window_size_right,
             ctx.softcap,
             ctx.deterministic,
             ctx.sm_margin,
@@ -334,7 +341,7 @@ class FlashAttnFunc(torch.autograd.Function):
         dq = dq[..., : q.shape[-1]]  # We could have padded the head dimension
         dk = dk[..., : k.shape[-1]]
         dv = dv[..., : v.shape[-1]]
-        return dq, dk, dv, None, None, None, None, None, None, None, None, None, None, None, None, None, None
+        return dq, dk, dv, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None
 
 
 class FlashAttnVarlenFunc(torch.autograd.Function):
@@ -355,7 +362,8 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
         causal,
         qv=None,
         q_descale=None, k_descale=None, v_descale=None,
-        window_size=(-1, -1),
+        window_size_left=None,
+        window_size_right=None,
         attention_chunk=0,
         softcap=0.0,
         num_splits=1,
@@ -390,7 +398,8 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
             q_descale, k_descale, v_descale,
             softmax_scale,
             causal=causal,
-            window_size=window_size,
+            window_size_left=window_size_left,
+            window_size_right=window_size_right,
             attention_chunk=attention_chunk,
             softcap=softcap,
             num_splits=num_splits,
@@ -403,7 +412,8 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
         ctx.max_seqlen_k = max_seqlen_k
         ctx.softmax_scale = softmax_scale
         ctx.causal = causal
-        ctx.window_size = window_size
+        ctx.window_size_left = window_size_left
+        ctx.window_size_right = window_size_right
         ctx.attention_chunk = attention_chunk
         ctx.softcap = softcap
         ctx.deterministic = deterministic
@@ -433,7 +443,8 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
             dv,
             ctx.softmax_scale,
             ctx.causal,
-            ctx.window_size,
+            ctx.window_size_left,
+            ctx.window_size_right,
             ctx.softcap,
             ctx.deterministic,
             ctx.sm_margin,
@@ -441,7 +452,7 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
         dq = dq[..., : q.shape[-1]]  # We could have padded the head dimension
         dk = dk[..., : k.shape[-1]]
         dv = dv[..., : v.shape[-1]]
-        return dq, dk, dv, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None
+        return dq, dk, dv, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None
 
 
 def flash_attn_qkvpacked_func(
@@ -449,7 +460,8 @@ def flash_attn_qkvpacked_func(
     softmax_scale=None,
     causal=False,
     q_descale=None, k_descale=None, v_descale=None,
-    window_size=(-1, -1),
+    window_size_left=None,
+    window_size_right=None,
     attention_chunk=0,
     softcap=0.0,
     deterministic=False,
@@ -463,8 +475,8 @@ def flash_attn_qkvpacked_func(
     For multi-query and grouped-query attention (MQA/GQA), please see
     flash_attn_kvpacked_func and flash_attn_func.
 
-    If window_size != (-1, -1), implements sliding window local attention. Query at position i
-    will only attend to keys between [i - window_size[0], i + window_size[1]] inclusive.
+    If window_size_left or window_size_right are set (not None), implements sliding window local attention. Query at position i
+    will only attend to keys between [i - window_size_left, i + window_size_right] inclusive.
 
     Arguments:
         qkv: (batch_size, seqlen, 3, nheads, headdim)
@@ -472,7 +484,8 @@ def flash_attn_qkvpacked_func(
         softmax_scale: float. The scaling of QK^T before applying softmax.
             Default to 1 / sqrt(headdim).
         causal: bool. Whether to apply causal attention mask (e.g., for auto-regressive modeling).
-        window_size: (left, right). If not (-1, -1), implements sliding window local attention.
+        window_size_left: int or None. Left window size for local attention.
+        window_size_right: int or None. Right window size for local attention.
         softcap: float. Anything > 0 activates softcapping attention.
         alibi_slopes: (nheads,) or (batch_size, nheads), fp32. A bias of (-alibi_slope * |i - j|) is added to
             the attention score of query i and key j.
@@ -495,7 +508,8 @@ def flash_attn_qkvpacked_func(
         softmax_scale,
         causal,
         q_descale, k_descale, v_descale,
-        window_size,
+        window_size_left,
+        window_size_right,
         attention_chunk,
         softcap,
         deterministic,
@@ -512,7 +526,8 @@ def flash_attn_func(
     causal=False,
     qv=None,
     q_descale=None, k_descale=None, v_descale=None,
-    window_size=(-1, -1),
+    window_size_left=None,
+    window_size_right=None,
     attention_chunk=0,
     softcap=0.0,
     num_splits=1,
@@ -538,9 +553,9 @@ def flash_attn_func(
         1 1
     If the row of the mask is all zero, the output will be zero.
 
-    If window_size != (-1, -1), implements sliding window local attention. Query at position i
+    If window_size_left or window_size_right are set (not None), implements sliding window local attention. Query at position i
     will only attend to keys between
-    [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q + window_size[1]] inclusive.
+    [i + seqlen_k - seqlen_q - window_size_left, i + seqlen_k - seqlen_q + window_size_right] inclusive.
 
     Arguments:
         q: (batch_size, seqlen, nheads, headdim)
@@ -550,7 +565,8 @@ def flash_attn_func(
         softmax_scale: float. The scaling of QK^T before applying softmax.
             Default to 1 / sqrt(headdim).
         causal: bool. Whether to apply causal attention mask (e.g., for auto-regressive modeling).
-        window_size: (left, right). If not (-1, -1), implements sliding window local attention.
+        window_size_left: int or None. Left window size for local attention.
+        window_size_right: int or None. Right window size for local attention.
         alibi_slopes: (nheads,) or (batch_size, nheads), fp32. A bias of
             (-alibi_slope * |i + seqlen_k - seqlen_q - j|)
             is added to the attention score of query i and key j.
@@ -573,7 +589,8 @@ def flash_attn_func(
         causal,
         qv,
         q_descale, k_descale, v_descale,
-        window_size,
+        window_size_left,
+        window_size_right,
         attention_chunk,
         softcap,
         num_splits,
@@ -597,7 +614,8 @@ def flash_attn_varlen_func(
     causal=False,
     qv=None,
     q_descale=None, k_descale=None, v_descale=None,
-    window_size=(-1, -1),
+    window_size_left=None,
+    window_size_right=None,
     attention_chunk=0,
     softcap=0.0,
     num_splits=1,
@@ -619,7 +637,8 @@ def flash_attn_varlen_func(
         causal,
         qv,
         q_descale, k_descale, v_descale,
-        window_size,
+        window_size_left,
+        window_size_right,
         attention_chunk,
         softcap,
         num_splits,
@@ -655,7 +674,8 @@ def flash_attn_with_kvcache(
     v_descale: Optional[torch.Tensor] = None,
     softmax_scale=None,
     causal=False,
-    window_size=(-1, -1),  # -1 means infinite context window
+    window_size_left=None,  # None means infinite context window
+    window_size_right=None,  # None means infinite context window
     attention_chunk=0,
     softcap=0.0, # 0.0 means deactivated
     rotary_interleaved=True,
@@ -677,7 +697,7 @@ def flash_attn_with_kvcache(
 
     Also apply rotary embedding if rotary_cos and rotary_sin are passed in. The key @k will be
     rotated by rotary_cos and rotary_sin at indices cache_seqlens, cache_seqlens + 1, etc.
-    If causal or local (i.e., window_size != (-1, -1)), the query @q will be rotated by rotary_cos
+    If causal or local (i.e., window_size_left or window_size_right are set), the query @q will be rotated by rotary_cos
     and rotary_sin at indices cache_seqlens, cache_seqlens + 1, etc.
     If not causal and not local, the query @q will be rotated by rotary_cos and rotary_sin at
     indices cache_seqlens only (i.e. we consider all tokens in @q to be at position cache_seqlens).
@@ -701,9 +721,9 @@ def flash_attn_with_kvcache(
         1 1
     If the row of the mask is all zero, the output will be zero.
 
-    If window_size != (-1, -1), implements sliding window local attention. Query at position i
+    If window_size_left or window_size_right are set (not None), implements sliding window local attention. Query at position i
     will only attend to keys between
-    [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q + window_size[1]] inclusive.
+    [i + seqlen_k - seqlen_q - window_size_left, i + seqlen_k - seqlen_q + window_size_right] inclusive.
 
     Note: Does not support backward pass.
 
@@ -732,7 +752,8 @@ def flash_attn_with_kvcache(
         softmax_scale: float. The scaling of QK^T before applying softmax.
             Default to 1 / sqrt(headdim).
         causal: bool. Whether to apply causal attention mask (e.g., for auto-regressive modeling).
-        window_size: (left, right). If not (-1, -1), implements sliding window local attention.
+        window_size_left: int or None. Left window size for local attention.
+        window_size_right: int or None. Right window size for local attention.
         softcap: float. Anything > 0 activates softcapping attention.
         rotary_interleaved: bool. Only applicable if rotary_cos and rotary_sin are passed in.
             If True, rotary embedding will combine dimensions 0 & 1, 2 & 3, etc. If False,
@@ -783,7 +804,8 @@ def flash_attn_with_kvcache(
         q_descale, k_descale, v_descale,
         softmax_scale,
         causal=causal,
-        window_size=window_size,
+        window_size_left=window_size_left,
+        window_size_right=window_size_right,
         attention_chunk=attention_chunk,
         softcap=softcap,
         rotary_interleaved=rotary_interleaved,
@@ -807,7 +829,8 @@ def get_scheduler_metadata(
     page_size: Optional[int] = None,
     max_seqlen_k_new=0,
     causal=False,
-    window_size=(-1, -1),  # -1 means infinite context window
+    window_size_left=None,  # None means infinite context window
+    window_size_right=None,  # None means infinite context window
     attention_chunk=0,
     has_softcap=False,
     num_splits=0,    # Can be tuned for speed
@@ -829,7 +852,8 @@ def get_scheduler_metadata(
         page_size,
         max_seqlen_k_new,
         causal,
-        window_size[0], window_size[1],
+        window_size_left,
+        window_size_right,
         attention_chunk,
         has_softcap,
         num_splits,

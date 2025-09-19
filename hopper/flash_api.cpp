@@ -519,8 +519,8 @@ mha_fwd_get_scheduler_metadata(
         std::optional<int64_t> page_size,
         int64_t max_seqlen_k_new,  // 0 means we're not appending new KV
         bool is_causal,
-        int64_t window_size_left,
-        int64_t window_size_right,
+        std::optional<at::Tensor> window_size_left_tensor_,
+        std::optional<at::Tensor> window_size_right_tensor_,
         int64_t attention_chunk,
         bool has_softcap,
         int64_t num_splits,
@@ -556,6 +556,27 @@ mha_fwd_get_scheduler_metadata(
     params.seqused_k = seqused_k.data_ptr<int>();
     params.leftpad_k = leftpad_k_.has_value() ? leftpad_k_.value().data_ptr<int>() : nullptr;
     params.knew_ptr = params.seqlen_knew > 0 ? reinterpret_cast<int*>(1) : nullptr;
+
+    // Extract window_size values from tensors
+    int64_t window_size_left = -1;
+    if (window_size_left_tensor_.has_value()) {
+        at::Tensor window_size_left_tensor = window_size_left_tensor_.value();
+        if (window_size_left_tensor.numel() == 1) {
+            window_size_left = window_size_left_tensor.item<int>();
+        } else {
+            TORCH_CHECK(false, "window_size_left_tensor must be a scalar tensor");
+        }
+    }
+    int64_t window_size_right = -1;
+    if (window_size_right_tensor_.has_value()) {
+        at::Tensor window_size_right_tensor = window_size_right_tensor_.value();
+        if (window_size_right_tensor.numel() == 1) {
+            window_size_right = window_size_right_tensor.item<int>();
+        } else {
+            TORCH_CHECK(false, "window_size_right_tensor must be a scalar tensor");
+        }
+    }
+
     if (window_size_left >= max_seqlen_k - 1) { window_size_left = -1; }
     if (window_size_right >= max_seqlen_q - 1) { window_size_right = -1; }
     // causal=true is the same as causal=false in this case
@@ -661,8 +682,8 @@ mha_fwd(at::Tensor q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seql
         std::optional<at::Tensor> v_descale_,  // (b, h_k)
         std::optional<double> softmax_scale_,
         bool is_causal,
-        int64_t window_size_left,
-        int64_t window_size_right,
+        std::optional<at::Tensor> window_size_left_tensor_,
+        std::optional<at::Tensor> window_size_right_tensor_,
         int64_t attention_chunk,
         double softcap,
         bool is_rotary_interleaved,   // if true, rotary combines indices 0 & 1, else indices 0 & rotary_dim / 2
@@ -779,6 +800,26 @@ mha_fwd(at::Tensor q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seql
         if (head_size_v > 256) {
             TORCH_CHECK(q_type == at::ScalarType::Half || q_type == at::ScalarType::BFloat16,
                         "HeaddimV > 256 requires fp16 and bf16 data type");
+        }
+    }
+
+    // Extract window_size values from tensors
+    int64_t window_size_left = -1;
+    if (window_size_left_tensor_.has_value()) {
+        at::Tensor window_size_left_tensor = window_size_left_tensor_.value();
+        if (window_size_left_tensor.numel() == 1) {
+            window_size_left = window_size_left_tensor.item<int>();
+        } else {
+            TORCH_CHECK(false, "window_size_left_tensor must be a scalar tensor");
+        }
+    }
+    int64_t window_size_right = -1;
+    if (window_size_right_tensor_.has_value()) {
+        at::Tensor window_size_right_tensor = window_size_right_tensor_.value();
+        if (window_size_right_tensor.numel() == 1) {
+            window_size_right = window_size_right_tensor.item<int>();
+        } else {
+            TORCH_CHECK(false, "window_size_right_tensor must be a scalar tensor");
         }
     }
 
@@ -1257,8 +1298,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tenso
     std::optional<at::Tensor> max_seqlen_k_tensor_,
     std::optional<double> softmax_scale_,
     bool is_causal,
-    int64_t window_size_left,
-    int64_t window_size_right,
+    std::optional<at::Tensor> window_size_left_tensor_,
+    std::optional<at::Tensor> window_size_right_tensor_,
     double softcap,
     bool deterministic,
     int64_t sm_margin
@@ -1355,6 +1396,26 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tenso
     double softmax_scale = 1.0 / sqrt(double(head_size));
     if (softmax_scale_.has_value()) {
         softmax_scale = softmax_scale_.value();
+    }
+
+    // Extract window_size values from tensors
+    int64_t window_size_left = -1;
+    if (window_size_left_tensor_.has_value()) {
+        at::Tensor window_size_left_tensor = window_size_left_tensor_.value();
+        if (window_size_left_tensor.numel() == 1) {
+            window_size_left = window_size_left_tensor.item<int>();
+        } else {
+            TORCH_CHECK(false, "window_size_left_tensor must be a scalar tensor");
+        }
+    }
+    int64_t window_size_right = -1;
+    if (window_size_right_tensor_.has_value()) {
+        at::Tensor window_size_right_tensor = window_size_right_tensor_.value();
+        if (window_size_right_tensor.numel() == 1) {
+            window_size_right = window_size_right_tensor.item<int>();
+        } else {
+            TORCH_CHECK(false, "window_size_right_tensor must be a scalar tensor");
+        }
     }
 
     // This needs to go before kBlockM & kBlockN since we rely on the correct window_size and is_causal to set kBlockM
@@ -1696,8 +1757,8 @@ TORCH_LIBRARY(flash_attn_3, m) {
         "Tensor? v_descale = None,"
         "float? softmax_scale = None,"
         "bool is_causal = False,"
-        "int window_size_left = -1,"
-        "int window_size_right = -1,"
+        "Tensor? window_size_left = None,"
+        "Tensor? window_size_right = None,"
         "int attention_chunk = 0,"
         "float softcap = 0.0,"
         "bool is_rotary_interleaved = False,"
@@ -1723,8 +1784,8 @@ TORCH_LIBRARY(flash_attn_3, m) {
         "Tensor? max_seqlen_k = None,"
         "float? softmax_scale = None,"
         "bool is_causal = False,"
-        "int window_size_left = -1,"
-        "int window_size_right = -1,"
+        "Tensor? window_size_left = None,"
+        "Tensor? window_size_right = None,"
         "float softcap = 0.0,"
         "bool deterministic = False,"
         "int sm_margin = 0) -> (Tensor(dq!), Tensor(dk!), Tensor(dv!), Tensor, Tensor, Tensor, Tensor, Tensor)");
@@ -1751,8 +1812,8 @@ TORCH_LIBRARY(flash_attn_3, m) {
         "int? page_size = None,"
         "int max_seqlen_k_new = 0,"
         "bool is_causal = False,"
-        "int window_size_left = -1,"
-        "int window_size_right = -1,"
+        "Tensor? window_size_left = None,"
+        "Tensor? window_size_right = None,"
         "int attention_chunk = 0,"
         "bool has_softcap = False,"
         "int num_splits = 0,"
