@@ -365,6 +365,11 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
     ):
         if softmax_scale is None:
             softmax_scale = (q.shape[-1] + (qv.shape[-1] if qv is not None else 0)) ** (-0.5)
+        # Convert max_seqlen to tensors if they are integers
+        if isinstance(max_seqlen_q, int):
+            max_seqlen_q = torch.tensor(max_seqlen_q)
+        if isinstance(max_seqlen_k, int):
+            max_seqlen_k = torch.tensor(max_seqlen_k)
         # out, q, k, v, out_padded, softmax_lse = _flash_attn_varlen_forward(
         out, softmax_lse, *rest = _flash_attn_forward(
             q,
