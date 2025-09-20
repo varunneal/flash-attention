@@ -68,7 +68,7 @@ def _flash_attn_forward(
     k_descale: Optional[torch.Tensor] = None,
     v_descale: Optional[torch.Tensor] = None,
     softmax_scale: Optional[float] = None,
-    causal: bool = False,
+    is_causal: bool = False,
     window_size_left: Optional[torch.Tensor] = None,
     window_size_right: Optional[torch.Tensor] = None,
     attention_chunk: int = 0,
@@ -115,7 +115,7 @@ def _flash_attn_forward(
         k_descale,
         v_descale,
         softmax_scale,
-        causal,
+        is_causal,
         window_size_left,
         window_size_right,
         attention_chunk,
@@ -150,8 +150,8 @@ def _flash_attn_forward_fake(
     cu_seqlens_k_new: Optional[torch.Tensor] = None,
     seqused_q: Optional[torch.Tensor] = None,
     seqused_k: Optional[torch.Tensor] = None,
-    max_seqlen_q: Optional[int] = None,
-    max_seqlen_k: Optional[int] = None,
+    max_seqlen_q: Optional[torch.Tensor] = None,
+    max_seqlen_k: Optional[torch.Tensor] = None,
     page_table: Optional[torch.Tensor] = None,
     kv_batch_idx: Optional[torch.Tensor] = None,
     leftpad_k: Optional[torch.Tensor] = None,
@@ -162,9 +162,9 @@ def _flash_attn_forward_fake(
     k_descale: Optional[torch.Tensor] = None,
     v_descale: Optional[torch.Tensor] = None,
     softmax_scale: Optional[float] = None,
-    causal: bool = False,
-    window_size_left: int = -1,
-    window_size_right: int = -1,
+    is_causal: bool = False,
+    window_size_left: Optional[torch.Tensor] = None,
+    window_size_right: Optional[torch.Tensor] = None,
     attention_chunk: int = 0,
     softcap: float = 0.0,
     rotary_interleaved: bool = True,
@@ -189,7 +189,7 @@ def _flash_attn_forward_fake(
 
         if max_seqlen_q is None:
             raise ValueError("max_seqlen_q must be provided if cu_seqlens_q is provided")
-        seqlen_q = max_seqlen_q
+        seqlen_q = max_seqlen_q.item() if isinstance(max_seqlen_q, torch.Tensor) else max_seqlen_q
     else:
         # batch mode: q is (batch_size, seqlen_q, num_heads, head_size)
         batch_size, seqlen_q, num_heads, head_size = q.shape
@@ -304,15 +304,15 @@ def _flash_attn_backward_fake(
     cu_seqlens_k: Optional[torch.Tensor] = None,
     sequed_q: Optional[torch.Tensor] = None,
     sequed_k: Optional[torch.Tensor] = None,
-    max_seqlen_q: Optional[int] = None,
-    max_seqlen_k: Optional[int] = None,
+    max_seqlen_q: Optional[torch.Tensor] = None,
+    max_seqlen_k: Optional[torch.Tensor] = None,
     dq: Optional[torch.Tensor] = None,
     dk: Optional[torch.Tensor] = None,
     dv: Optional[torch.Tensor] = None,
     softmax_scale: Optional[float] = None,
     is_causal: bool = False,
-    window_size_left: int = -1,
-    window_size_right: int = -1,
+    window_size_left: Optional[torch.Tensor] = None,
+    window_size_right: Optional[torch.Tensor] = None,
     softcap: float = 0.0,
     deterministic: bool = False,
     sm_margin: int = 0,
@@ -330,19 +330,23 @@ def _flash_attn_backward_fake(
     else:
         batch_size = cu_seqlens_q.size(0) - 1
         total_q = q.size(0)
-        seqlen_q = max_seqlen_q
-        seqlen_k = max_seqlen_k
+        seqlen_q = max_seqlen_q.item() if isinstance(max_seqlen_q, torch.Tensor) else max_seqlen_q
+        seqlen_k = max_seqlen_k.item() if isinstance(max_seqlen_k, torch.Tensor) else max_seqlen_k
 
-    if window_size_left >= seqlen_k - 1:
-        window_size_left = -1
+    # Extract window size values from tensors
+    window_left = -1 if window_size_left is None else (window_size_left.item() if isinstance(window_size_left, torch.Tensor) else window_size_left)
+    window_right = -1 if window_size_right is None else (window_size_right.item() if isinstance(window_size_right, torch.Tensor) else window_size_right)
 
-    if window_size_right >= seqlen_q - 1:
-        window_size_right = -1
+    if window_left >= seqlen_k - 1:
+        window_left = -1
+
+    if window_right >= seqlen_q - 1:
+        window_right = -1
 
     if is_causal:
-        window_size_right = 0
+        window_right = 0
 
-    is_causal = window_size_left < 0 and window_size_right == 0
+    is_causal = window_left < 0 and window_right == 0
 
     head_size = q.size(-1)
     head_size_v = v.size(-1)
@@ -352,7 +356,7 @@ def _flash_attn_backward_fake(
     cap = torch.cuda.get_device_capability(q.device)
     arch = cap[0] * 10 + cap[1]
 
-    is_local = (window_size_left >= 0 or window_size_right >= 0) and not is_causal
+    is_local = (window_left >= 0 or window_right >= 0) and not is_causal
 
     if arch < 90:
         raise ValueError(f"Only cuda compute capabilities 9.0 or newer are supported. Got {arch=}")
@@ -390,7 +394,7 @@ def setup_context(ctx, inputs, output):
     out, softmax_lse, _, _ = output
     ctx.save_for_backward(q, k, v, out, softmax_lse)
     ctx.softmax_scale = inputs[-11]
-    ctx.causal = inputs[-10]
+    ctx.is_causal = inputs[-10]
     ctx.window_size = [inputs[-9], inputs[-8]]
     ctx.attention_chunk = inputs[-7]
     ctx.softcap = inputs[-6]
@@ -414,7 +418,7 @@ def _backward(ctx, dout, *grads):
         dk,
         dv,
         ctx.softmax_scale,
-        ctx.causal,
+        ctx.is_causal,
         ctx.window_size[0],
         ctx.window_size[1],
         ctx.softcap,
@@ -469,7 +473,7 @@ class FlashAttnQKVPackedFunc(torch.autograd.Function):
             None, None, None,  # rotary_cos/sin, seqlens_rotary
             q_descale, k_descale, v_descale,
             softmax_scale,
-            causal=causal,
+            is_causal=causal,
             window_size_left=window_size[0],
             window_size_right=window_size[1],
             attention_chunk=attention_chunk,
@@ -479,7 +483,7 @@ class FlashAttnQKVPackedFunc(torch.autograd.Function):
         # ctx.save_for_backward(q, k, v, out_padded, softmax_lse)
         ctx.save_for_backward(q, k, v, out, softmax_lse)
         ctx.softmax_scale = softmax_scale
-        ctx.causal = causal
+        ctx.is_causal = causal
         ctx.window_size = window_size
         ctx.attention_chunk = attention_chunk
         ctx.softcap = softcap
@@ -516,7 +520,7 @@ class FlashAttnQKVPackedFunc(torch.autograd.Function):
             dk,
             dv,
             ctx.softmax_scale,
-            ctx.causal,
+            ctx.is_causal,
             ctx.window_size_left,
             ctx.window_size_right,
             ctx.softcap,
@@ -566,7 +570,7 @@ class FlashAttnFunc(torch.autograd.Function):
             None, None, None,  # rotary_cos/sin, seqlens_rotary
             q_descale, k_descale, v_descale,
             softmax_scale,
-            causal=causal,
+            is_causal=causal,
             window_size_left=window_size_left,
             window_size_right=window_size_right,
             attention_chunk=attention_chunk,
@@ -578,7 +582,7 @@ class FlashAttnFunc(torch.autograd.Function):
         # ctx.save_for_backward(q, k, v, out_padded, softmax_lse)
         ctx.save_for_backward(q, k, v, out, softmax_lse)
         ctx.softmax_scale = softmax_scale
-        ctx.causal = causal
+        ctx.is_causal = causal
         ctx.window_size_left = window_size_left
         ctx.window_size_right = window_size_right
         ctx.attention_chunk = attention_chunk
@@ -606,7 +610,7 @@ class FlashAttnFunc(torch.autograd.Function):
             dk,
             dv,
             ctx.softmax_scale,
-            ctx.causal,
+            ctx.is_causal,
             ctx.window_size_left,
             ctx.window_size_right,
             ctx.softcap,
@@ -673,7 +677,7 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
             None, None, None,  # rotary_cos/sin, seqlens_rotary
             q_descale, k_descale, v_descale,
             softmax_scale,
-            causal=causal,
+            is_causal=causal,
             window_size_left=window_size_left,
             window_size_right=window_size_right,
             attention_chunk=attention_chunk,
@@ -687,7 +691,7 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
         ctx.max_seqlen_q = max_seqlen_q
         ctx.max_seqlen_k = max_seqlen_k
         ctx.softmax_scale = softmax_scale
-        ctx.causal = causal
+        ctx.is_causal = causal
         ctx.window_size_left = window_size_left
         ctx.window_size_right = window_size_right
         ctx.attention_chunk = attention_chunk
@@ -718,7 +722,7 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
             dk,
             dv,
             ctx.softmax_scale,
-            ctx.causal,
+            ctx.is_causal,
             ctx.window_size_left,
             ctx.window_size_right,
             ctx.softcap,
