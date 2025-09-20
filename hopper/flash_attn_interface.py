@@ -56,8 +56,8 @@ def _flash_attn_forward(
     cu_seqlens_k_new: Optional[torch.Tensor] = None,
     seqused_q: Optional[torch.Tensor] = None,
     seqused_k: Optional[torch.Tensor] = None,
-    max_seqlen_q: Optional[int] = None,
-    max_seqlen_k: Optional[int] = None,
+    max_seqlen_q: Optional[torch.Tensor] = None,
+    max_seqlen_k: Optional[torch.Tensor] = None,
     page_table: Optional[torch.Tensor] = None,
     kv_batch_idx: Optional[torch.Tensor] = None,
     leftpad_k: Optional[torch.Tensor] = None,
@@ -150,8 +150,8 @@ def _flash_attn_forward_fake(
     cu_seqlens_k_new: Optional[torch.Tensor] = None,
     seqused_q: Optional[torch.Tensor] = None,
     seqused_k: Optional[torch.Tensor] = None,
-    max_seqlen_q: Optional[int] = None,
-    max_seqlen_k: Optional[int] = None,
+    max_seqlen_q: Optional[torch.Tensor] = None,
+    max_seqlen_k: Optional[torch.Tensor] = None,
     page_table: Optional[torch.Tensor] = None,
     kv_batch_idx: Optional[torch.Tensor] = None,
     leftpad_k: Optional[torch.Tensor] = None,
@@ -189,7 +189,7 @@ def _flash_attn_forward_fake(
 
         if max_seqlen_q is None:
             raise ValueError("max_seqlen_q must be provided if cu_seqlens_q is provided")
-        seqlen_q = max_seqlen_q
+        seqlen_q = max_seqlen_q.item() if isinstance(max_seqlen_q, torch.Tensor) else max_seqlen_q
     else:
         # batch mode: q is (batch_size, seqlen_q, num_heads, head_size)
         batch_size, seqlen_q, num_heads, head_size = q.shape
@@ -250,8 +250,8 @@ def _flash_attn_backward(
     cu_seqlens_k: Optional[torch.Tensor] = None,
     sequed_q: Optional[torch.Tensor] = None,
     sequed_k: Optional[torch.Tensor] = None,
-    max_seqlen_q: Optional[int] = None,
-    max_seqlen_k: Optional[int] = None,
+    max_seqlen_q: Optional[torch.Tensor] = None,
+    max_seqlen_k: Optional[torch.Tensor] = None,
     dq: Optional[torch.Tensor] = None,
     dk: Optional[torch.Tensor] = None,
     dv: Optional[torch.Tensor] = None,
@@ -304,8 +304,8 @@ def _flash_attn_backward_fake(
     cu_seqlens_k: Optional[torch.Tensor] = None,
     sequed_q: Optional[torch.Tensor] = None,
     sequed_k: Optional[torch.Tensor] = None,
-    max_seqlen_q: Optional[int] = None,
-    max_seqlen_k: Optional[int] = None,
+    max_seqlen_q: Optional[torch.Tensor] = None,
+    max_seqlen_k: Optional[torch.Tensor] = None,
     dq: Optional[torch.Tensor] = None,
     dk: Optional[torch.Tensor] = None,
     dv: Optional[torch.Tensor] = None,
@@ -330,8 +330,8 @@ def _flash_attn_backward_fake(
     else:
         batch_size = cu_seqlens_q.size(0) - 1
         total_q = q.size(0)
-        seqlen_q = max_seqlen_q
-        seqlen_k = max_seqlen_k
+        seqlen_q = max_seqlen_q.item() if isinstance(max_seqlen_q, torch.Tensor) else max_seqlen_q
+        seqlen_k = max_seqlen_k.item() if isinstance(max_seqlen_k, torch.Tensor) else max_seqlen_k
 
     if window_size_left >= seqlen_k - 1:
         window_size_left = -1

@@ -676,9 +676,9 @@ mha_fwd(at::Tensor q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seql
         std::optional<at::Tensor> cu_seqlens_k_new_,  // b+1
         std::optional<at::Tensor> seqused_q_, // b. If given, only this many elements of each batch element's queries and outputs are used.
         std::optional<at::Tensor> seqused_k_, // b. If given, only this many elements of each batch element's keys are used.
-        std::optional<int64_t> max_seqlen_q_,
+        std::optional<at::Tensor> max_seqlen_q_,
         // TODO: check if we need max_seqlen_k
-        std::optional<int64_t> max_seqlen_k_,
+        std::optional<at::Tensor> max_seqlen_k_,
         std::optional<at::Tensor> page_table_, // (b_k, max_num_pages_per_seq)
         std::optional<at::Tensor> kv_batch_idx_, // b. indices to index into the KV cache
         std::optional<at::Tensor> leftpad_k_, // b
@@ -749,9 +749,24 @@ mha_fwd(at::Tensor q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seql
         TORCH_CHECK(!kv_batch_idx_.has_value(), "If cu_seqlens_k is passed in, then page table is not supported");
     }
 
+    // Extract max_seqlen values from tensor arguments if provided
+    int max_seqlen_q = 0;
+    if (is_varlen_q && max_seqlen_q_.has_value()) {
+        at::Tensor max_seqlen_q_tensor = max_seqlen_q_.value();
+        TORCH_CHECK(max_seqlen_q_tensor.numel() == 1, "max_seqlen_q must be a scalar tensor");
+        max_seqlen_q = max_seqlen_q_tensor.item<int>();
+    }
+
+    int max_seqlen_k = 0;
+    if (is_varlen_k && max_seqlen_k_.has_value()) {
+        at::Tensor max_seqlen_k_tensor = max_seqlen_k_.value();
+        TORCH_CHECK(max_seqlen_k_tensor.numel() == 1, "max_seqlen_k must be a scalar tensor");
+        max_seqlen_k = max_seqlen_k_tensor.item<int>();
+    }
+
     auto const sizes = q.sizes();
     const int batch_size = !is_varlen_q ? sizes[0] : cu_seqlens_q.size(0) - 1;
-    int seqlen_q = !is_varlen_q ? sizes[1] : max_seqlen_q_.value();
+    int seqlen_q = !is_varlen_q ? sizes[1] : max_seqlen_q;
     int total_q = !is_varlen_q ? batch_size * sizes[1] : sizes[0];
     int num_heads = q.size(-2);
     int const head_size = q.size(-1);
@@ -759,7 +774,7 @@ mha_fwd(at::Tensor q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seql
     int const max_num_pages_per_seq = !paged_KV ? 0 : page_table.size(1);
     int const num_pages = !paged_KV ? 0 : k.size(0);
     int const page_size = !paged_KV ? 1 : k.size(1);
-    int const seqlen_k = !is_varlen_k ? (!paged_KV ? k.size(1) : max_num_pages_per_seq * page_size) : max_seqlen_k_.value();
+    int const seqlen_k = !is_varlen_k ? (!paged_KV ? k.size(1) : max_num_pages_per_seq * page_size) : max_seqlen_k;
     int const total_k = !is_varlen_k ? batch_size * k.size(1) : k.size(0);
     int const num_heads_k = k.size(-2);
     int const batch_size_k = !paged_KV ? (!is_varlen_k ? k.size(0) : cu_seqlens_k.size(0) - 1) : page_table.size(0);
@@ -1330,14 +1345,29 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor> mha_bwd(
         TORCH_CHECK(!is_varlen, "This flash attention build does not support varlen.");
     #endif
 
+    // Extract max_seqlen values from tensor arguments if provided
+    int max_seqlen_q = 0;
+    if (is_varlen_q && max_seqlen_q_.has_value()) {
+        at::Tensor max_seqlen_q_tensor = max_seqlen_q_.value();
+        TORCH_CHECK(max_seqlen_q_tensor.numel() == 1, "max_seqlen_q must be a scalar tensor");
+        max_seqlen_q = max_seqlen_q_tensor.item<int>();
+    }
+
+    int max_seqlen_k = 0;
+    if (is_varlen_k && max_seqlen_k_.has_value()) {
+        at::Tensor max_seqlen_k_tensor = max_seqlen_k_.value();
+        TORCH_CHECK(max_seqlen_k_tensor.numel() == 1, "max_seqlen_k must be a scalar tensor");
+        max_seqlen_k = max_seqlen_k_tensor.item<int>();
+    }
+
     auto const sizes = q.sizes();
     int const batch_size = !is_varlen_q ? sizes[0] : cu_seqlens_q.size(0) - 1;
-    int const seqlen_q = !is_varlen_q ? sizes[1] : max_seqlen_q_.value();
+    int const seqlen_q = !is_varlen_q ? sizes[1] : max_seqlen_q;
     int const total_q = !is_varlen_q ? batch_size * sizes[1] : sizes[0];
     int const num_heads = q.size(-2);
     int const head_size = q.size(-1);
     int const head_size_v = v.size(-1);
-    int const seqlen_k = !is_varlen_k ? k.size(1) : max_seqlen_k_.value();
+    int const seqlen_k = !is_varlen_k ? k.size(1) : max_seqlen_k;
     int const total_k = !is_varlen_k ? batch_size * k.size(1) : k.size(0);
     int const num_heads_k = k.size(-2);
     TORCH_CHECK(head_size % 8 == 0, "head_size should be a multiple of 8");
@@ -1677,8 +1707,8 @@ TORCH_LIBRARY(flash_attn_3, m) {
         "Tensor? cu_seqlens_k_new = None,"
         "Tensor? seqused_q = None,"
         "Tensor? seqused_k = None,"
-        "int? max_seqlen_q = None,"
-        "int? max_seqlen_k = None,"
+        "Tensor? max_seqlen_q = None,"
+        "Tensor? max_seqlen_k = None,"
         "Tensor? page_table = None,"
         "Tensor? kv_batch_idx = None,"
         "Tensor? leftpad_k = None,"
@@ -1713,8 +1743,8 @@ TORCH_LIBRARY(flash_attn_3, m) {
         "Tensor? cu_seqlens_k = None,"
         "Tensor? seqused_q = None,"
         "Tensor? seqused_k = None,"
-        "int? max_seqlen_q = None,"
-        "int? max_seqlen_k = None,"
+        "Tensor? max_seqlen_q = None,"
+        "Tensor? max_seqlen_k = None,"
         "float? softmax_scale = None,"
         "bool is_causal = False,"
         "int window_size_left = -1,"
