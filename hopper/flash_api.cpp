@@ -531,8 +531,8 @@ mha_fwd_get_scheduler_metadata(
         std::optional<int64_t> page_size,
         int64_t max_seqlen_k_new,  // 0 means we're not appending new KV
         bool is_causal,
-        int64_t window_size_left,
-        int64_t window_size_right,
+        std::optional<at::Tensor> window_size_left_tensor_,
+        std::optional<at::Tensor> window_size_right_tensor_,
         int64_t attention_chunk,
         bool has_softcap,
         int64_t num_splits,
@@ -567,6 +567,27 @@ mha_fwd_get_scheduler_metadata(
     params.seqused_k = seqused_k.data_ptr<int>();
     params.leftpad_k = leftpad_k_.has_value() ? leftpad_k_.value().data_ptr<int>() : nullptr;
     params.knew_ptr = params.seqlen_knew > 0 ? reinterpret_cast<int*>(1) : nullptr;
+
+    // Extract window_size values from tensors
+    int64_t window_size_left = -1;
+    if (window_size_left_tensor_.has_value()) {
+        at::Tensor window_size_left_tensor = window_size_left_tensor_.value();
+        if (window_size_left_tensor.numel() == 1) {
+            window_size_left = window_size_left_tensor.item<int>();
+        } else {
+            TORCH_CHECK(false, "window_size_left_tensor must be a scalar tensor");
+        }
+    }
+    int64_t window_size_right = -1;
+    if (window_size_right_tensor_.has_value()) {
+        at::Tensor window_size_right_tensor = window_size_right_tensor_.value();
+        if (window_size_right_tensor.numel() == 1) {
+            window_size_right = window_size_right_tensor.item<int>();
+        } else {
+            TORCH_CHECK(false, "window_size_right_tensor must be a scalar tensor");
+        }
+    }
+
     if (window_size_left >= max_seqlen_k - 1) { window_size_left = -1; }
     if (window_size_right >= max_seqlen_q - 1) { window_size_right = -1; }
     // causal=true is the same as causal=false in this case
@@ -676,9 +697,9 @@ mha_fwd(at::Tensor q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seql
         std::optional<at::Tensor> cu_seqlens_k_new_,  // b+1
         std::optional<at::Tensor> seqused_q_, // b. If given, only this many elements of each batch element's queries and outputs are used.
         std::optional<at::Tensor> seqused_k_, // b. If given, only this many elements of each batch element's keys are used.
-        std::optional<int64_t> max_seqlen_q_,
+        std::optional<at::Tensor> max_seqlen_q_tensor_,
         // TODO: check if we need max_seqlen_k
-        std::optional<int64_t> max_seqlen_k_,
+        std::optional<at::Tensor> max_seqlen_k_tensor_,
         std::optional<at::Tensor> page_table_, // (b_k, max_num_pages_per_seq)
         std::optional<at::Tensor> kv_batch_idx_, // b. indices to index into the KV cache
         std::optional<at::Tensor> leftpad_k_, // b
@@ -690,8 +711,8 @@ mha_fwd(at::Tensor q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seql
         std::optional<at::Tensor> v_descale_,  // (b, h_k)
         std::optional<double> softmax_scale_,
         bool is_causal,
-        int64_t window_size_left,
-        int64_t window_size_right,
+        std::optional<at::Tensor> window_size_left_tensor_,
+        std::optional<at::Tensor> window_size_right_tensor_,
         int64_t attention_chunk,
         double softcap,
         bool is_rotary_interleaved,   // if true, rotary combines indices 0 & 1, else indices 0 & rotary_dim / 2
@@ -736,7 +757,7 @@ mha_fwd(at::Tensor q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seql
         cu_seqlens_q = cu_seqlens_q_.value();
         CHECK_DEVICE(cu_seqlens_q); CHECK_CONTIGUOUS(cu_seqlens_q);
         TORCH_CHECK(cu_seqlens_q.dtype() == torch::kInt32, "cu_seqlens_q must have dtype torch.int32");
-        TORCH_CHECK(max_seqlen_q_.has_value(), "max_seqlen_q must be provided if cu_seqlens_q is provided");
+        TORCH_CHECK(max_seqlen_q_tensor_.has_value(), "max_seqlen_q must be provided if cu_seqlens_q is provided");
     }
     at::Tensor cu_seqlens_k;
     bool const is_varlen_k = cu_seqlens_k_.has_value();
@@ -744,14 +765,40 @@ mha_fwd(at::Tensor q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seql
         cu_seqlens_k = cu_seqlens_k_.value();
         CHECK_DEVICE(cu_seqlens_k); CHECK_CONTIGUOUS(cu_seqlens_k);
         TORCH_CHECK(cu_seqlens_k.dtype() == torch::kInt32, "cu_seqlens_k must have dtype torch.int32");
-        TORCH_CHECK(max_seqlen_k_.has_value(), "max_seqlen_k must be provided if cu_seqlens_k is provided");
+        TORCH_CHECK(max_seqlen_k_tensor_.has_value(), "max_seqlen_k must be provided if cu_seqlens_k is provided");
         TORCH_CHECK(!paged_KV, "If cu_seqlens_k is passed in, then page table is not supported");
         TORCH_CHECK(!kv_batch_idx_.has_value(), "If cu_seqlens_k is passed in, then page table is not supported");
     }
 
+    // Extract max_seqlen values from tensors
+    int max_seqlen_k;
+    if (is_varlen_k) {
+        at::Tensor max_seqlen_k_tensor = max_seqlen_k_tensor_.value();
+        if (max_seqlen_k_tensor.numel() == 1) {
+            // Handle scalar tensor (including FakeTensor)
+            max_seqlen_k = max_seqlen_k_tensor.item<int>();
+        } else {
+            TORCH_CHECK(false, "max_seqlen_k_tensor must be a scalar tensor");
+        }
+    } else {
+        max_seqlen_k = (!paged_KV ? k.size(1) : page_table.size(1) * k.size(1));
+    }
+    int max_seqlen_q;
+    if (is_varlen_q) {
+        at::Tensor max_seqlen_q_tensor = max_seqlen_q_tensor_.value();
+        if (max_seqlen_q_tensor.numel() == 1) {
+            // Handle scalar tensor (including FakeTensor)
+            max_seqlen_q = max_seqlen_q_tensor.item<int>();
+        } else {
+            TORCH_CHECK(false, "max_seqlen_q_tensor must be a scalar tensor");
+        }
+    } else {
+        max_seqlen_q = q.sizes()[1];
+    }
+
     auto const sizes = q.sizes();
     const int batch_size = !is_varlen_q ? sizes[0] : cu_seqlens_q.size(0) - 1;
-    int seqlen_q = !is_varlen_q ? sizes[1] : max_seqlen_q_.value();
+    int seqlen_q = !is_varlen_q ? sizes[1] : max_seqlen_q;
     int total_q = !is_varlen_q ? batch_size * sizes[1] : sizes[0];
     int num_heads = q.size(-2);
     int const head_size = q.size(-1);
@@ -759,7 +806,7 @@ mha_fwd(at::Tensor q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seql
     int const max_num_pages_per_seq = !paged_KV ? 0 : page_table.size(1);
     int const num_pages = !paged_KV ? 0 : k.size(0);
     int const page_size = !paged_KV ? 1 : k.size(1);
-    int const seqlen_k = !is_varlen_k ? (!paged_KV ? k.size(1) : max_num_pages_per_seq * page_size) : max_seqlen_k_.value();
+    int const seqlen_k = !is_varlen_k ? (!paged_KV ? k.size(1) : max_num_pages_per_seq * page_size) : max_seqlen_k;
     int const total_k = !is_varlen_k ? batch_size * k.size(1) : k.size(0);
     int const num_heads_k = k.size(-2);
     int const batch_size_k = !paged_KV ? (!is_varlen_k ? k.size(0) : cu_seqlens_k.size(0) - 1) : page_table.size(0);
@@ -782,6 +829,26 @@ mha_fwd(at::Tensor q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seql
         if (head_size_v > 256) {
             TORCH_CHECK(q_type == at::ScalarType::Half || q_type == at::ScalarType::BFloat16,
                         "HeaddimV > 256 requires fp16 and bf16 data type");
+        }
+    }
+
+    // Extract window_size values from tensors
+    int64_t window_size_left = -1;
+    if (window_size_left_tensor_.has_value()) {
+        at::Tensor window_size_left_tensor = window_size_left_tensor_.value();
+        if (window_size_left_tensor.numel() == 1) {
+            window_size_left = window_size_left_tensor.item<int>();
+        } else {
+            TORCH_CHECK(false, "window_size_left_tensor must be a scalar tensor");
+        }
+    }
+    int64_t window_size_right = -1;
+    if (window_size_right_tensor_.has_value()) {
+        at::Tensor window_size_right_tensor = window_size_right_tensor_.value();
+        if (window_size_right_tensor.numel() == 1) {
+            window_size_right = window_size_right_tensor.item<int>();
+        } else {
+            TORCH_CHECK(false, "window_size_right_tensor must be a scalar tensor");
         }
     }
 
@@ -1272,12 +1339,12 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor> mha_bwd(
     std::optional<at::Tensor> cu_seqlens_k_,   // b+1
     std::optional<at::Tensor> seqused_q_, // b. If given, only this many elements of each batch element's queries and outputs are used.
     std::optional<at::Tensor> seqused_k_, // b. If given, only this many elements of each batch element's keys are used.
-    std::optional<int64_t> max_seqlen_q_,
-    std::optional<int64_t> max_seqlen_k_,
+    std::optional<at::Tensor> max_seqlen_q_tensor_,
+    std::optional<at::Tensor> max_seqlen_k_tensor_,
     std::optional<double> softmax_scale_,
     bool is_causal,
-    int64_t window_size_left,
-    int64_t window_size_right,
+    std::optional<at::Tensor> window_size_left_tensor_,
+    std::optional<at::Tensor> window_size_right_tensor_,
     double softcap,
     bool deterministic,
     int64_t sm_margin
@@ -1314,7 +1381,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor> mha_bwd(
         cu_seqlens_q = cu_seqlens_q_.value();
         CHECK_DEVICE(cu_seqlens_q); CHECK_CONTIGUOUS(cu_seqlens_q);
         TORCH_CHECK(cu_seqlens_q.dtype() == torch::kInt32, "cu_seqlens_q must have dtype torch.int32");
-        TORCH_CHECK(max_seqlen_q_.has_value(), "max_seqlen_q must be provided if cu_seqlens_q is provided");
+        TORCH_CHECK(max_seqlen_q_tensor_.has_value(), "max_seqlen_q must be provided if cu_seqlens_q is provided");
     }
     at::Tensor cu_seqlens_k;
     bool const is_varlen_k = cu_seqlens_k_.has_value();
@@ -1322,7 +1389,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor> mha_bwd(
         cu_seqlens_k = cu_seqlens_k_.value();
         CHECK_DEVICE(cu_seqlens_k); CHECK_CONTIGUOUS(cu_seqlens_k);
         TORCH_CHECK(cu_seqlens_k.dtype() == torch::kInt32, "cu_seqlens_k must have dtype torch.int32");
-        TORCH_CHECK(max_seqlen_k_.has_value(), "max_seqlen_k must be provided if cu_seqlens_k is provided");
+        TORCH_CHECK(max_seqlen_k_tensor_.has_value(), "max_seqlen_k must be provided if cu_seqlens_k is provided");
     }
     // This is what we will template on
     bool const is_varlen = is_varlen_q || is_varlen_k || seqused_q_.has_value() || seqused_k_.has_value();
@@ -1330,14 +1397,40 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor> mha_bwd(
         TORCH_CHECK(!is_varlen, "This flash attention build does not support varlen.");
     #endif
 
+    // Extract max_seqlen values from tensors
+    int max_seqlen_k;
+    if (is_varlen_k) {
+        at::Tensor max_seqlen_k_tensor = max_seqlen_k_tensor_.value();
+        if (max_seqlen_k_tensor.numel() == 1) {
+            // Handle scalar tensor (including FakeTensor)
+            max_seqlen_k = max_seqlen_k_tensor.item<int>();
+        } else {
+            TORCH_CHECK(false, "max_seqlen_k_tensor must be a scalar tensor");
+        }
+    } else {
+        max_seqlen_k = k.size(1);
+    }
+    int max_seqlen_q;
+    if (is_varlen_q) {
+        at::Tensor max_seqlen_q_tensor = max_seqlen_q_tensor_.value();
+        if (max_seqlen_q_tensor.numel() == 1) {
+            // Handle scalar tensor (including FakeTensor)
+            max_seqlen_q = max_seqlen_q_tensor.item<int>();
+        } else {
+            TORCH_CHECK(false, "max_seqlen_q_tensor must be a scalar tensor");
+        }
+    } else {
+        max_seqlen_q = q.sizes()[1];
+    }
+
     auto const sizes = q.sizes();
     int const batch_size = !is_varlen_q ? sizes[0] : cu_seqlens_q.size(0) - 1;
-    int const seqlen_q = !is_varlen_q ? sizes[1] : max_seqlen_q_.value();
+    int const seqlen_q = !is_varlen_q ? sizes[1] : max_seqlen_q;
     int const total_q = !is_varlen_q ? batch_size * sizes[1] : sizes[0];
     int const num_heads = q.size(-2);
     int const head_size = q.size(-1);
     int const head_size_v = v.size(-1);
-    int const seqlen_k = !is_varlen_k ? k.size(1) : max_seqlen_k_.value();
+    int const seqlen_k = !is_varlen_k ? k.size(1) : max_seqlen_k;
     int const total_k = !is_varlen_k ? batch_size * k.size(1) : k.size(0);
     int const num_heads_k = k.size(-2);
     TORCH_CHECK(head_size % 8 == 0, "head_size should be a multiple of 8");
@@ -1348,6 +1441,26 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor> mha_bwd(
     double softmax_scale = 1.0 / sqrt(double(head_size));
     if (softmax_scale_.has_value()) {
         softmax_scale = softmax_scale_.value();
+    }
+
+    // Extract window_size values from tensors
+    int64_t window_size_left = -1;
+    if (window_size_left_tensor_.has_value()) {
+        at::Tensor window_size_left_tensor = window_size_left_tensor_.value();
+        if (window_size_left_tensor.numel() == 1) {
+            window_size_left = window_size_left_tensor.item<int>();
+        } else {
+            TORCH_CHECK(false, "window_size_left_tensor must be a scalar tensor");
+        }
+    }
+    int64_t window_size_right = -1;
+    if (window_size_right_tensor_.has_value()) {
+        at::Tensor window_size_right_tensor = window_size_right_tensor_.value();
+        if (window_size_right_tensor.numel() == 1) {
+            window_size_right = window_size_right_tensor.item<int>();
+        } else {
+            TORCH_CHECK(false, "window_size_right_tensor must be a scalar tensor");
+        }
     }
 
     // This needs to go before kBlockM & kBlockN since we rely on the correct window_size and is_causal to set kBlockM
@@ -1677,8 +1790,8 @@ TORCH_LIBRARY(flash_attn_3, m) {
         "Tensor? cu_seqlens_k_new = None,"
         "Tensor? seqused_q = None,"
         "Tensor? seqused_k = None,"
-        "int? max_seqlen_q = None,"
-        "int? max_seqlen_k = None,"
+        "Tensor? max_seqlen_q = None,"
+        "Tensor? max_seqlen_k = None,"
         "Tensor? page_table = None,"
         "Tensor? kv_batch_idx = None,"
         "Tensor? leftpad_k = None,"
@@ -1690,8 +1803,8 @@ TORCH_LIBRARY(flash_attn_3, m) {
         "Tensor? v_descale = None,"
         "float? softmax_scale = None,"
         "bool is_causal = False,"
-        "int window_size_left = -1,"
-        "int window_size_right = -1,"
+        "Tensor? window_size_left = None,"
+        "Tensor? window_size_right = None,"
         "int attention_chunk = 0,"
         "float softcap = 0.0,"
         "bool is_rotary_interleaved = False,"
@@ -1713,12 +1826,12 @@ TORCH_LIBRARY(flash_attn_3, m) {
         "Tensor? cu_seqlens_k = None,"
         "Tensor? seqused_q = None,"
         "Tensor? seqused_k = None,"
-        "int? max_seqlen_q = None,"
-        "int? max_seqlen_k = None,"
+        "Tensor? max_seqlen_q = None,"
+        "Tensor? max_seqlen_k = None,"
         "float? softmax_scale = None,"
         "bool is_causal = False,"
-        "int window_size_left = -1,"
-        "int window_size_right = -1,"
+        "Tensor? window_size_left = None,"
+        "Tensor? window_size_right = None,"
         "float softcap = 0.0,"
         "bool deterministic = False,"
         "int sm_margin = 0) -> (Tensor, Tensor, Tensor, Tensor, Tensor)");
@@ -1745,8 +1858,8 @@ TORCH_LIBRARY(flash_attn_3, m) {
         "int? page_size = None,"
         "int max_seqlen_k_new = 0,"
         "bool is_causal = False,"
-        "int window_size_left = -1,"
-        "int window_size_right = -1,"
+        "Tensor? window_size_left = None,"
+        "Tensor? window_size_right = None,"
         "int attention_chunk = 0,"
         "bool has_softcap = False,"
         "int num_splits = 0,"
