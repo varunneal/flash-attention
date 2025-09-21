@@ -586,8 +586,8 @@ mha_fwd_get_scheduler_metadata(
 
     params.is_causal = window_size_left < 0 && window_size_right == 0 && attention_chunk == 0;
     params.is_local = (window_size_left >= 0 || window_size_right >= 0 || attention_chunk >= 1) && !params.is_causal;
-    if (window_size_left < 0) { window_size_left = max_seqlen_k - 1; }
-    if (window_size_right < 0) { window_size_right = max_seqlen_q - 1; }
+    if (window_size_left < 0) { window_size_left = max_seqlen_k_val - 1; }
+    if (window_size_right < 0) { window_size_right = max_seqlen_q_val - 1; }
     if (attention_chunk > 0) {
         window_size_left = std::min(window_size_left, attention_chunk - 1);
         window_size_right = std::min(window_size_right, attention_chunk - 1);
@@ -1293,8 +1293,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor> mha_bwd(
     std::optional<at::Tensor> cu_seqlens_k_,   // b+1
     std::optional<at::Tensor> seqused_q_, // b. If given, only this many elements of each batch element's queries and outputs are used.
     std::optional<at::Tensor> seqused_k_, // b. If given, only this many elements of each batch element's keys are used.
-    std::optional<int64_t> max_seqlen_q_,
-    std::optional<int64_t> max_seqlen_k_,
+    std::optional<at::Tensor> max_seqlen_q_,
+    std::optional<at::Tensor> max_seqlen_k_,
     std::optional<double> softmax_scale_,
     bool is_causal,
     int64_t window_size_left,
