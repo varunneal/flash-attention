@@ -189,7 +189,7 @@ def _flash_attn_forward_fake(
 
         if max_seqlen_q is None:
             raise ValueError("max_seqlen_q must be provided if cu_seqlens_q is provided")
-        seqlen_q = max_seqlen_q.item() if isinstance(max_seqlen_q, torch.Tensor) else max_seqlen_q
+        seqlen_q = max_seqlen_q
     else:
         # batch mode: q is (batch_size, seqlen_q, num_heads, head_size)
         batch_size, seqlen_q, num_heads, head_size = q.shape
@@ -330,8 +330,8 @@ def _flash_attn_backward_fake(
     else:
         batch_size = cu_seqlens_q.size(0) - 1
         total_q = q.size(0)
-        seqlen_q = max_seqlen_q.item() if isinstance(max_seqlen_q, torch.Tensor) else max_seqlen_q
-        seqlen_k = max_seqlen_k.item() if isinstance(max_seqlen_k, torch.Tensor) else max_seqlen_k
+        seqlen_q = max_seqlen_q
+        seqlen_k = max_seqlen_k
 
     if window_size_left >= seqlen_k - 1:
         window_size_left = -1
@@ -932,7 +932,7 @@ def flash_attn_with_kvcache(
     page_table: Optional[torch.Tensor] = None,
     cu_seqlens_q: Optional[torch.Tensor] = None,
     cu_seqlens_k_new: Optional[torch.Tensor] = None,
-    max_seqlen_q: Optional[int] = None,
+    max_seqlen_q: Optional[torch.Tensor] = None,
     rotary_seqlens: Optional[torch.Tensor] = None,
     q_descale: Optional[torch.Tensor] = None,
     k_descale: Optional[torch.Tensor] = None,
@@ -1082,7 +1082,7 @@ def flash_attn_with_kvcache(
 
 
 def get_scheduler_metadata(
-    batch_size, max_seqlen_q, max_seqlen_k, num_heads_q, num_heads_kv, headdim,
+    batch_size, max_seqlen_q: torch.Tensor, max_seqlen_k: torch.Tensor, num_heads_q, num_heads_kv, headdim,
     cache_seqlens: torch.Tensor,
     qkv_dtype=torch.bfloat16,
     headdim_v=None,

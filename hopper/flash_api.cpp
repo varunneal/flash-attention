@@ -515,8 +515,8 @@ inline int round_up_headdimv(int head_size) {
 at::Tensor
 mha_fwd_get_scheduler_metadata(
         int64_t batch_size,
-        int64_t max_seqlen_q,
-        int64_t max_seqlen_k,
+        at::Tensor max_seqlen_q,
+        at::Tensor max_seqlen_k,
         int64_t num_heads,
         int64_t num_heads_k,
         int64_t headdim,
@@ -543,13 +543,19 @@ mha_fwd_get_scheduler_metadata(
                 "FlashAttention only supports fp16, bf16, and fp8_e4m3 data type");
     TORCH_CHECK(num_heads % num_heads_k == 0, "Number of heads in key/value must divide number of heads in query");
 
+    // Extract integer values from tensor arguments
+    TORCH_CHECK(max_seqlen_q.numel() == 1, "max_seqlen_q must be a scalar tensor");
+    TORCH_CHECK(max_seqlen_k.numel() == 1, "max_seqlen_k must be a scalar tensor");
+    int max_seqlen_q_val = max_seqlen_q.item<int>();
+    int max_seqlen_k_val = max_seqlen_k.item<int>();
+
     // Reset the parameters
     Flash_fwd_params params{};
     params.is_bf16 = qkv_dtype == at::ScalarType::BFloat16;
     params.is_e4m3 = qkv_dtype == at::ScalarType::Float8_e4m3fn;
     params.b = batch_size;
-    params.seqlen_q = max_seqlen_q;
-    params.seqlen_k = max_seqlen_k;
+    params.seqlen_q = max_seqlen_q_val;
+    params.seqlen_k = max_seqlen_k_val;
     params.h = num_heads;
     params.h_k = num_heads_k;
     params.d = headdim;
@@ -567,10 +573,10 @@ mha_fwd_get_scheduler_metadata(
     params.seqused_k = seqused_k.data_ptr<int>();
     params.leftpad_k = leftpad_k_.has_value() ? leftpad_k_.value().data_ptr<int>() : nullptr;
     params.knew_ptr = params.seqlen_knew > 0 ? reinterpret_cast<int*>(1) : nullptr;
-    if (window_size_left >= max_seqlen_k - 1) { window_size_left = -1; }
-    if (window_size_right >= max_seqlen_q - 1) { window_size_right = -1; }
+    if (window_size_left >= max_seqlen_k_val - 1) { window_size_left = -1; }
+    if (window_size_right >= max_seqlen_q_val - 1) { window_size_right = -1; }
     // causal=true is the same as causal=false in this case
-    if (max_seqlen_q == 1 && window_size_left == -1 && window_size_right == -1 && attention_chunk == 0) {
+    if (max_seqlen_q_val == 1 && window_size_left == -1 && window_size_right == -1 && attention_chunk == 0) {
         // Special case of hdim 128 where we want causal to have kBlockN=128, better for pagedKV and TMA
         if ((headdim <= 64 || headdim > 128) || !page_size.has_value()) {
             is_causal = false;
@@ -1759,8 +1765,8 @@ TORCH_LIBRARY(flash_attn_3, m) {
         "ScalarType? out_dtype = None) -> (Tensor(out!), Tensor)");
     m.def("get_scheduler_metadata("
         "int batch_size,"
-        "int max_seqlen_q,"
-        "int max_seqlen_k,"
+        "Tensor max_seqlen_q,"
+        "Tensor max_seqlen_k,"
         "int num_heads,"
         "int num_heads_k,"
         "int headdim,"
