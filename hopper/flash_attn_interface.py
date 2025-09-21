@@ -69,8 +69,8 @@ def _flash_attn_forward(
     v_descale: Optional[torch.Tensor] = None,
     softmax_scale: Optional[float] = None,
     causal: bool = False,
-    window_size_left: int = -1,
-    window_size_right: int = -1,
+    window_size_left: Optional[torch.Tensor] = None,
+    window_size_right: Optional[torch.Tensor] = None,
     attention_chunk: int = 0,
     softcap: float = 0.0,
     rotary_interleaved: bool = True,
@@ -90,6 +90,12 @@ def _flash_attn_forward(
     ]
     rotary_cos, rotary_sin = [maybe_contiguous(x) for x in (rotary_cos, rotary_sin)]
     seqlens_rotary = maybe_contiguous(seqlens_rotary)
+
+    # Create default tensors for window_size if None
+    if window_size_left is None:
+        window_size_left = torch.tensor(-1, dtype=torch.int32, device=q.device)
+    if window_size_right is None:
+        window_size_right = torch.tensor(-1, dtype=torch.int32, device=q.device)
     out, softmax_lse, out_accum, softmax_lse_accum = flash_attn_3_cuda.fwd(
         q,
         k,
@@ -163,8 +169,8 @@ def _flash_attn_forward_fake(
     v_descale: Optional[torch.Tensor] = None,
     softmax_scale: Optional[float] = None,
     causal: bool = False,
-    window_size_left: int = -1,
-    window_size_right: int = -1,
+    window_size_left: Optional[torch.Tensor] = None,
+    window_size_right: Optional[torch.Tensor] = None,
     attention_chunk: int = 0,
     softcap: float = 0.0,
     rotary_interleaved: bool = True,
@@ -257,14 +263,21 @@ def _flash_attn_backward(
     dv: Optional[torch.Tensor] = None,
     softmax_scale: Optional[float] = None,
     is_causal: bool = False,
-    window_size_left: int = -1,
-    window_size_right: int = -1,
+    window_size_left: Optional[torch.Tensor] = None,
+    window_size_right: Optional[torch.Tensor] = None,
     softcap: float = 0.0,
     deterministic: bool = False,
     sm_margin: int = 0,
 ) -> torch.Tensor:
     # dq, dk, dv are allocated by us so they should already be contiguous
     dout, q, k, v, out = [maybe_contiguous(x) for x in (dout, q, k, v, out)]
+
+    # Create default tensors for window_size if None
+    if window_size_left is None:
+        window_size_left = torch.tensor(-1, dtype=torch.int32, device=q.device)
+    if window_size_right is None:
+        window_size_right = torch.tensor(-1, dtype=torch.int32, device=q.device)
+
     softmax_d, *rest = flash_attn_3_cuda.bwd(
         dout,
         q,
@@ -311,8 +324,8 @@ def _flash_attn_backward_fake(
     dv: Optional[torch.Tensor] = None,
     softmax_scale: Optional[float] = None,
     is_causal: bool = False,
-    window_size_left: int = -1,
-    window_size_right: int = -1,
+    window_size_left: Optional[torch.Tensor] = None,
+    window_size_right: Optional[torch.Tensor] = None,
     softcap: float = 0.0,
     deterministic: bool = False,
     sm_margin: int = 0,
@@ -333,16 +346,15 @@ def _flash_attn_backward_fake(
         seqlen_q = max_seqlen_q
         seqlen_k = max_seqlen_k
 
-    if window_size_left >= seqlen_k - 1:
-        window_size_left = -1
+    # Keep window_size as tensors for torch.compile compatibility
+    # These comparisons would be handled in C++ after extraction
+    if window_size_left is None:
+        window_size_left = torch.tensor(-1, dtype=torch.int32, device=q.device)
+    if window_size_right is None:
+        window_size_right = torch.tensor(-1, dtype=torch.int32, device=q.device)
 
-    if window_size_right >= seqlen_q - 1:
-        window_size_right = -1
-
-    if is_causal:
-        window_size_right = 0
-
-    is_causal = window_size_left < 0 and window_size_right == 0
+    # Don't perform comparisons that would break torch.compile
+    # The C++ backend will handle the logic
 
     head_size = q.size(-1)
     head_size_v = v.size(-1)
@@ -352,7 +364,9 @@ def _flash_attn_backward_fake(
     cap = torch.cuda.get_device_capability(q.device)
     arch = cap[0] * 10 + cap[1]
 
-    is_local = (window_size_left >= 0 or window_size_right >= 0) and not is_causal
+    # For fake implementation, we can't do comparisons that would force concrete values
+    # Use a placeholder value - the actual value will be determined in C++
+    is_local = False  # This is just for determining kBlockM in the fake impl
 
     if arch < 90:
         raise ValueError(f"Only cuda compute capabilities 9.0 or newer are supported. Got {arch=}")
@@ -436,7 +450,8 @@ class FlashAttnQKVPackedFunc(torch.autograd.Function):
         softmax_scale,
         causal,
         q_descale=None, k_descale=None, v_descale=None,
-        window_size=(-1, -1),
+        window_size_left: Optional[torch.Tensor] = None,
+        window_size_right: Optional[torch.Tensor] = None,
         attention_chunk=0,
         softcap=0.0,
         deterministic=False,
@@ -470,8 +485,8 @@ class FlashAttnQKVPackedFunc(torch.autograd.Function):
             q_descale, k_descale, v_descale,
             softmax_scale,
             causal=causal,
-            window_size_left=window_size[0],
-            window_size_right=window_size[1],
+            window_size_left=window_size_left,
+            window_size_right=window_size_right,
             attention_chunk=attention_chunk,
             softcap=softcap,
             sm_margin=sm_margin,
@@ -480,7 +495,7 @@ class FlashAttnQKVPackedFunc(torch.autograd.Function):
         ctx.save_for_backward(q, k, v, out, softmax_lse)
         ctx.softmax_scale = softmax_scale
         ctx.causal = causal
-        ctx.window_size = window_size
+        ctx.window_size = [window_size_left, window_size_right]
         ctx.attention_chunk = attention_chunk
         ctx.softcap = softcap
         ctx.deterministic = deterministic
@@ -539,7 +554,8 @@ class FlashAttnFunc(torch.autograd.Function):
         causal,
         qv=None,
         q_descale=None, k_descale=None, v_descale=None,
-        window_size=(-1, -1),
+        window_size_left: Optional[torch.Tensor] = None,
+        window_size_right: Optional[torch.Tensor] = None,
         attention_chunk=0,
         softcap=0.0,
         num_splits=1,
@@ -566,8 +582,8 @@ class FlashAttnFunc(torch.autograd.Function):
             q_descale, k_descale, v_descale,
             softmax_scale,
             causal=causal,
-            window_size_left=window_size[0],
-            window_size_right=window_size[1],
+            window_size_left=window_size_left,
+            window_size_right=window_size_right,
             attention_chunk=attention_chunk,
             softcap=softcap,
             num_splits=num_splits,
@@ -578,7 +594,7 @@ class FlashAttnFunc(torch.autograd.Function):
         ctx.save_for_backward(q, k, v, out, softmax_lse)
         ctx.softmax_scale = softmax_scale
         ctx.causal = causal
-        ctx.window_size = window_size
+        ctx.window_size = [window_size_left, window_size_right]
         ctx.attention_chunk = attention_chunk
         ctx.softcap = softcap
         ctx.deterministic = deterministic
@@ -635,7 +651,8 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
         causal,
         qv=None,
         q_descale=None, k_descale=None, v_descale=None,
-        window_size=(-1, -1),
+        window_size_left: Optional[torch.Tensor] = None,
+        window_size_right: Optional[torch.Tensor] = None,
         attention_chunk=0,
         softcap=0.0,
         num_splits=1,
@@ -666,8 +683,8 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
             q_descale, k_descale, v_descale,
             softmax_scale,
             causal=causal,
-            window_size_left=window_size[0],
-            window_size_right=window_size[1],
+            window_size_left=window_size_left,
+            window_size_right=window_size_right,
             attention_chunk=attention_chunk,
             softcap=softcap,
             num_splits=num_splits,
@@ -680,7 +697,7 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
         ctx.max_seqlen_k = max_seqlen_k
         ctx.softmax_scale = softmax_scale
         ctx.causal = causal
-        ctx.window_size = window_size
+        ctx.window_size = [window_size_left, window_size_right]
         ctx.attention_chunk = attention_chunk
         ctx.softcap = softcap
         ctx.deterministic = deterministic
@@ -727,7 +744,8 @@ def flash_attn_qkvpacked_func(
     softmax_scale=None,
     causal=False,
     q_descale=None, k_descale=None, v_descale=None,
-    window_size=(-1, -1),
+    window_size_left: Optional[torch.Tensor] = None,
+    window_size_right: Optional[torch.Tensor] = None,
     attention_chunk=0,
     softcap=0.0,
     deterministic=False,
@@ -742,8 +760,8 @@ def flash_attn_qkvpacked_func(
     For multi-query and grouped-query attention (MQA/GQA), please see
     flash_attn_kvpacked_func and flash_attn_func.
 
-    If window_size != (-1, -1), implements sliding window local attention. Query at position i
-    will only attend to keys between [i - window_size[0], i + window_size[1]] inclusive.
+    If window_size_left >= 0 or window_size_right >= 0, implements sliding window local attention. Query at position i
+    will only attend to keys between [i - window_size_left, i + window_size_right] inclusive.
 
     Arguments:
         qkv: (batch_size, seqlen, 3, nheads, headdim)
@@ -751,7 +769,8 @@ def flash_attn_qkvpacked_func(
         softmax_scale: float. The scaling of QK^T before applying softmax.
             Default to 1 / sqrt(headdim).
         causal: bool. Whether to apply causal attention mask (e.g., for auto-regressive modeling).
-        window_size: (left, right). If not (-1, -1), implements sliding window local attention.
+        window_size_left: int. If >= 0, implements left side of sliding window local attention.
+        window_size_right: int. If >= 0, implements right side of sliding window local attention.
         softcap: float. Anything > 0 activates softcapping attention.
         alibi_slopes: (nheads,) or (batch_size, nheads), fp32. A bias of (-alibi_slope * |i - j|) is added to
             the attention score of query i and key j.
@@ -774,7 +793,8 @@ def flash_attn_qkvpacked_func(
         softmax_scale,
         causal,
         q_descale, k_descale, v_descale,
-        window_size,
+        window_size_left,
+        window_size_right,
         attention_chunk,
         softcap,
         deterministic,
@@ -792,7 +812,8 @@ def flash_attn_func(
     causal=False,
     qv=None,
     q_descale=None, k_descale=None, v_descale=None,
-    window_size=(-1, -1),
+    window_size_left: Optional[torch.Tensor] = None,
+    window_size_right: Optional[torch.Tensor] = None,
     attention_chunk=0,
     softcap=0.0,
     num_splits=1,
@@ -819,9 +840,9 @@ def flash_attn_func(
         1 1
     If the row of the mask is all zero, the output will be zero.
 
-    If window_size != (-1, -1), implements sliding window local attention. Query at position i
+    If window_size_left >= 0 or window_size_right >= 0, implements sliding window local attention. Query at position i
     will only attend to keys between
-    [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q + window_size[1]] inclusive.
+    [i + seqlen_k - seqlen_q - window_size_left, i + seqlen_k - seqlen_q + window_size_right] inclusive.
 
     Arguments:
         q: (batch_size, seqlen, nheads, headdim)
@@ -831,7 +852,8 @@ def flash_attn_func(
         softmax_scale: float. The scaling of QK^T before applying softmax.
             Default to 1 / sqrt(headdim).
         causal: bool. Whether to apply causal attention mask (e.g., for auto-regressive modeling).
-        window_size: (left, right). If not (-1, -1), implements sliding window local attention.
+        window_size_left: int. If >= 0, implements left side of sliding window local attention.
+        window_size_right: int. If >= 0, implements right side of sliding window local attention.
         alibi_slopes: (nheads,) or (batch_size, nheads), fp32. A bias of
             (-alibi_slope * |i + seqlen_k - seqlen_q - j|)
             is added to the attention score of query i and key j.
@@ -854,7 +876,8 @@ def flash_attn_func(
         causal,
         qv,
         q_descale, k_descale, v_descale,
-        window_size,
+        window_size_left,
+        window_size_right,
         attention_chunk,
         softcap,
         num_splits,
@@ -879,7 +902,8 @@ def flash_attn_varlen_func(
     causal=False,
     qv=None,
     q_descale=None, k_descale=None, v_descale=None,
-    window_size=(-1, -1),
+    window_size_left: Optional[torch.Tensor] = None,
+    window_size_right: Optional[torch.Tensor] = None,
     attention_chunk=0,
     softcap=0.0,
     num_splits=1,
@@ -902,7 +926,8 @@ def flash_attn_varlen_func(
         causal,
         qv,
         q_descale, k_descale, v_descale,
-        window_size,
+        window_size_left,
+        window_size_right,
         attention_chunk,
         softcap,
         num_splits,
@@ -939,7 +964,8 @@ def flash_attn_with_kvcache(
     v_descale: Optional[torch.Tensor] = None,
     softmax_scale=None,
     causal=False,
-    window_size=(-1, -1),  # -1 means infinite context window
+    window_size_left: Optional[torch.Tensor] = None,  # None means infinite context window
+    window_size_right: Optional[torch.Tensor] = None,  # None means infinite context window
     attention_chunk=0,
     softcap=0.0, # 0.0 means deactivated
     rotary_interleaved=True,
@@ -961,7 +987,7 @@ def flash_attn_with_kvcache(
 
     Also apply rotary embedding if rotary_cos and rotary_sin are passed in. The key @k will be
     rotated by rotary_cos and rotary_sin at indices cache_seqlens, cache_seqlens + 1, etc.
-    If causal or local (i.e., window_size != (-1, -1)), the query @q will be rotated by rotary_cos
+    If causal or local (i.e., window_size_left >= 0 or window_size_right >= 0), the query @q will be rotated by rotary_cos
     and rotary_sin at indices cache_seqlens, cache_seqlens + 1, etc.
     If not causal and not local, the query @q will be rotated by rotary_cos and rotary_sin at
     indices cache_seqlens only (i.e. we consider all tokens in @q to be at position cache_seqlens).
@@ -985,9 +1011,9 @@ def flash_attn_with_kvcache(
         1 1
     If the row of the mask is all zero, the output will be zero.
 
-    If window_size != (-1, -1), implements sliding window local attention. Query at position i
+    If window_size_left >= 0 or window_size_right >= 0, implements sliding window local attention. Query at position i
     will only attend to keys between
-    [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q + window_size[1]] inclusive.
+    [i + seqlen_k - seqlen_q - window_size_left, i + seqlen_k - seqlen_q + window_size_right] inclusive.
 
     Note: Does not support backward pass.
 
@@ -1016,7 +1042,8 @@ def flash_attn_with_kvcache(
         softmax_scale: float. The scaling of QK^T before applying softmax.
             Default to 1 / sqrt(headdim).
         causal: bool. Whether to apply causal attention mask (e.g., for auto-regressive modeling).
-        window_size: (left, right). If not (-1, -1), implements sliding window local attention.
+        window_size_left: int. If >= 0, implements left side of sliding window local attention.
+        window_size_right: int. If >= 0, implements right side of sliding window local attention.
         softcap: float. Anything > 0 activates softcapping attention.
         rotary_interleaved: bool. Only applicable if rotary_cos and rotary_sin are passed in.
             If True, rotary embedding will combine dimensions 0 & 1, 2 & 3, etc. If False,
@@ -1067,8 +1094,8 @@ def flash_attn_with_kvcache(
         q_descale, k_descale, v_descale,
         softmax_scale,
         causal=causal,
-        window_size_left=window_size[0],
-        window_size_right=window_size[1],
+        window_size_left=window_size_left,
+        window_size_right=window_size_right,
         attention_chunk=attention_chunk,
         softcap=softcap,
         rotary_interleaved=rotary_interleaved,
@@ -1092,7 +1119,8 @@ def get_scheduler_metadata(
     page_size: Optional[int] = None,
     max_seqlen_k_new=0,
     causal=False,
-    window_size=(-1, -1),  # -1 means infinite context window
+    window_size_left: Optional[torch.Tensor] = None,  # None means infinite context window
+    window_size_right: Optional[torch.Tensor] = None,  # None means infinite context window
     attention_chunk=0,
     has_softcap=False,
     num_splits=0,    # Can be tuned for speed
@@ -1102,6 +1130,13 @@ def get_scheduler_metadata(
     cache_seqlens = maybe_contiguous(cache_seqlens)
     if headdim_v is None:
         headdim_v = headdim
+
+    # Create default tensors for window_size if None
+    if window_size_left is None:
+        window_size_left = torch.tensor(-1, dtype=torch.int32, device=cache_seqlens.device)
+    if window_size_right is None:
+        window_size_right = torch.tensor(-1, dtype=torch.int32, device=cache_seqlens.device)
+
     scheduler_metadata = flash_attn_3_cuda.get_scheduler_metadata(
         batch_size, max_seqlen_q, max_seqlen_k, num_heads_q, num_heads_kv, headdim, headdim_v,
         qkv_dtype,
@@ -1114,7 +1149,7 @@ def get_scheduler_metadata(
         page_size,
         max_seqlen_k_new,
         causal,
-        window_size[0], window_size[1],
+        window_size_left, window_size_right,
         attention_chunk,
         has_softcap,
         num_splits,
