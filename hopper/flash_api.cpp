@@ -146,8 +146,8 @@ void set_params_fprop(Flash_fwd_params &params,
     if (window_size_left < 0) { window_size_left = seqlen_k - 1; }
     if (window_size_right < 0) { window_size_right = seqlen_q - 1; }
     if (attention_chunk > 0) {
-        window_size_left = std::min(window_size_left, attention_chunk - 1);
-        window_size_right = std::min(window_size_right, attention_chunk - 1);
+        window_size_left = std::min(window_size_left, static_cast<int>(attention_chunk - 1));
+        window_size_right = std::min(window_size_right, static_cast<int>(attention_chunk - 1));
     }
     params.window_size_left = window_size_left;
     params.window_size_right = window_size_right;
@@ -604,8 +604,8 @@ mha_fwd_get_scheduler_metadata(
     if (window_size_left < 0) { window_size_left = max_seqlen_k_val - 1; }
     if (window_size_right < 0) { window_size_right = max_seqlen_q_val - 1; }
     if (attention_chunk > 0) {
-        window_size_left = std::min(window_size_left, attention_chunk - 1);
-        window_size_right = std::min(window_size_right, attention_chunk - 1);
+        window_size_left = std::min(window_size_left, static_cast<int>(attention_chunk - 1));
+        window_size_right = std::min(window_size_right, static_cast<int>(attention_chunk - 1));
     }
     params.window_size_left = window_size_left;
     params.window_size_right = window_size_right;
