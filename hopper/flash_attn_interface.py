@@ -238,7 +238,7 @@ def _flash_attn_forward_fake(
     return out, softmax_lse, out_accum, softmax_lse_accum
 
 
-@torch.library.custom_op("flash_attn_3::_flash_attn_backward", device_types="cuda")
+@torch.library.custom_op("flash_attn_3::_flash_attn_backward", mutates_args=(), device_types="cuda")
 def _flash_attn_backward(
     dout: torch.Tensor,
     q: torch.Tensor,
