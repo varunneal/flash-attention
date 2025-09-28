@@ -1323,16 +1323,13 @@ void run_mha_bwd(Flash_bwd_params &params, cudaStream_t stream) {
 // h: num_heads
 // h_k: num_heads_k
 // d: head_size
-std::tuple<Tensor, Tensor, Tensor, Tensor, Tensor> mha_bwd(
+std::tuple<Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor> mha_bwd(
     Tensor dout,  // (b, s_q, h, dv) or (total_q, h, dv) if there is cu_seqlens_q
     Tensor q,     // (b, s_q, h, d) or (total_q, h, d) if there is cu_seqlens_q
     Tensor k,     // (b, s_k, h_k, d) or (total_k, h_k, d) if there is cu_seqlens_k
     Tensor v,     // (b, s_k, h_k, dv) or (total_k, h_k, dv) if there is cu_seqlens_k
     Tensor out,   // (b, s_q, h, dv) or (total_q, h, dv) if there is cu_seqlens_q
     Tensor softmax_lse,    // (b, h, s_q) or (h, total_q) if there is cu_seqlens_q
-    std::optional<Tensor> dq_,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seqlens_q
-    std::optional<Tensor> dk_,   // (b, s_k, h_k, d) or (total_k, h_k, d) if there is cu_seqlens_k
-    std::optional<Tensor> dv_,   // (b, s_k, h_k, dv) or (total_k, h_k, dv) if there is cu_seqlens_k
     std::optional<Tensor> cu_seqlens_q_,   // b+1
     std::optional<Tensor> cu_seqlens_k_,   // b+1
     std::optional<Tensor> seqused_q_, // b. If given, only this many elements of each batch element's queries and outputs are used.
@@ -1485,46 +1482,11 @@ std::tuple<Tensor, Tensor, Tensor, Tensor, Tensor> mha_bwd(
         CHECK_SHAPE(seqused_k, batch_size);
     }
 
-    Tensor dq, dk, dv;
-    if (dq_.has_value()) {
-        dq = dq_.value();
-        STD_TORCH_CHECK(dq.scalar_type() == q_type, "dq must have the same dtype as q");
-        CHECK_DEVICE(dq);
-        STD_TORCH_CHECK(dq.stride(-1) == 1, "dq must have contiguous last dimension");
-        if (!is_varlen_q) {
-            CHECK_SHAPE(dq, batch_size, seqlen_q, num_heads, head_size);
-        } else {
-            CHECK_SHAPE(dq, total_q, num_heads, head_size);
-        }
-    } else {
-        dq = torch::stable::empty_like(q);
-    }
-    if (dk_.has_value()) {
-        dk = dk_.value();
-        STD_TORCH_CHECK(dk.scalar_type() == q_type, "dk must have the same dtype as q");
-        CHECK_DEVICE(dk);
-        STD_TORCH_CHECK(dk.stride(-1) == 1, "dk must have contiguous last dimension");
-        if (!is_varlen_k) {
-            CHECK_SHAPE(dk, batch_size, seqlen_k, num_heads_k, head_size);
-        } else {
-            CHECK_SHAPE(dk, total_k, num_heads_k, head_size);
-        }
-    } else {
-        dk = torch::stable::empty_like(k);
-    }
-    if (dv_.has_value()) {
-        dv = dv_.value();
-        STD_TORCH_CHECK(dv.scalar_type() == q_type, "dv must have the same dtype as q");
-        CHECK_DEVICE(dv);
-        STD_TORCH_CHECK(dv.stride(-1) == 1, "dv must have contiguous last dimension");
-        if (!is_varlen_k) {
-            CHECK_SHAPE(dv, batch_size, seqlen_k, num_heads_k, head_size_v);
-        } else {
-            CHECK_SHAPE(dv, total_k, num_heads_k, head_size_v);
-        }
-    } else {
-        dv = torch::stable::empty_like(v);
-    }
+    // Always allocate gradient tensors internally
+    // This avoids aliasing issues with PyTorch's custom operator framework
+    Tensor dq = torch::stable::empty_like(q);
+    Tensor dk = torch::stable::empty_like(k);
+    Tensor dv = torch::stable::empty_like(v);
 
     // Otherwise the kernel will be launched from cuda:0 device
     // Cast to char to avoid compiler warning about narrowing
@@ -1627,7 +1589,8 @@ std::tuple<Tensor, Tensor, Tensor, Tensor, Tensor> mha_bwd(
         torch::stable::zero_(softmax_d);
     }
 
-    return { softmax_d, softmax_lse_log2, dq_accum, dk_accum, dv_accum };
+    // Return the gradient tensors that were allocated internally
+    return { dq, dk, dv, softmax_d, softmax_lse_log2, dq_accum, dk_accum, dv_accum };
 }
 
 std::tuple<Tensor, Tensor>
@@ -1795,9 +1758,7 @@ void boxed_mha_bwd(
     auto v = to<Tensor>(stack[3]);
     auto out = to<Tensor>(stack[4]);
     auto softmax_lse = to<Tensor>(stack[5]);
-    auto dq = to<std::optional<Tensor>>(stack[6]);
-    auto dk = to<std::optional<Tensor>>(stack[7]);
-    auto dv = to<std::optional<Tensor>>(stack[8]);
+    // Skip stack[6], [7], [8] which were dq, dk, dv - no longer needed
     auto cu_seqlens_q = to<std::optional<Tensor>>(stack[9]);
     auto cu_seqlens_k = to<std::optional<Tensor>>(stack[10]);
     auto seqused_q = to<std::optional<Tensor>>(stack[11]);
@@ -1812,7 +1773,7 @@ void boxed_mha_bwd(
     auto deterministic = to<bool>(stack[20]);
     auto sm_margin = to<int64_t>(stack[21]);
 
-    auto [dq_, dk_, dv_, softmax_d, softmax_lse_log2, dq_accum, dk_accum, dv_accum] = mha_bwd(dout, q, k, v, out, softmax_lse, dq, dk, dv, cu_seqlens_q, cu_seqlens_k, seqused_q, seqused_k, max_seqlen_q, max_seqlen_k, softmax_scale, is_causal, window_size_left, window_size_right, softcap, deterministic, sm_margin);
+    auto [dq_, dk_, dv_, softmax_d, softmax_lse_log2, dq_accum, dk_accum, dv_accum] = mha_bwd(dout, q, k, v, out, softmax_lse, cu_seqlens_q, cu_seqlens_k, seqused_q, seqused_k, max_seqlen_q, max_seqlen_k, softmax_scale, is_causal, window_size_left, window_size_right, softcap, deterministic, sm_margin);
 
     stack[0] = from(dq_);
     stack[1] = from(dk_);
@@ -1918,9 +1879,9 @@ STABLE_TORCH_LIBRARY(flash_attn_3, m) {
         "Tensor v,"
         "Tensor out,"
         "Tensor softmax_lse,"
-        "Tensor(dq!)? dq = None,"
-        "Tensor(dk!)? dk = None,"
-        "Tensor(dv!)? dv = None,"
+        "Tensor? placeholder1 = None,"  // Keep placeholders for backward compatibility
+        "Tensor? placeholder2 = None,"  // These will be ignored
+        "Tensor? placeholder3 = None,"  // Python will pass None
         "Tensor? cu_seqlens_q = None,"
         "Tensor? cu_seqlens_k = None,"
         "Tensor? seqused_q = None,"
@@ -1933,7 +1894,7 @@ STABLE_TORCH_LIBRARY(flash_attn_3, m) {
         "int window_size_right = -1,"
         "float softcap = 0.0,"
         "bool deterministic = False,"
-        "int sm_margin = 0) -> (Tensor, Tensor, Tensor, Tensor, Tensor)");
+        "int sm_margin = 0) -> (Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor)");
     m.def("fwd_combine("
         "Tensor out_partial,"
         "Tensor lse_partial,"

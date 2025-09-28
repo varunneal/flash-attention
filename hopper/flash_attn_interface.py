@@ -238,7 +238,7 @@ def _flash_attn_forward_fake(
     return out, softmax_lse, out_accum, softmax_lse_accum
 
 
-@torch.library.custom_op("flash_attn_3::_flash_attn_backward", mutates_args=("dq", "dk", "dv"), device_types="cuda")
+@torch.library.custom_op("flash_attn_3::_flash_attn_backward", device_types="cuda")
 def _flash_attn_backward(
     dout: torch.Tensor,
     q: torch.Tensor,
@@ -252,9 +252,6 @@ def _flash_attn_backward(
     sequed_k: Optional[torch.Tensor] = None,
     max_seqlen_q: Optional[int] = None,
     max_seqlen_k: Optional[int] = None,
-    dq: Optional[torch.Tensor] = None,
-    dk: Optional[torch.Tensor] = None,
-    dv: Optional[torch.Tensor] = None,
     softmax_scale: Optional[float] = None,
     is_causal: bool = False,
     window_size_left: int = -1,
@@ -262,19 +259,19 @@ def _flash_attn_backward(
     softcap: float = 0.0,
     deterministic: bool = False,
     sm_margin: int = 0,
-) -> torch.Tensor:
-    # dq, dk, dv are allocated by us so they should already be contiguous
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     dout, q, k, v, out = [maybe_contiguous(x) for x in (dout, q, k, v, out)]
-    softmax_d, *rest = flash_attn_3_cuda.bwd(
+    # C++ now allocates and returns dq, dk, dv
+    dq, dk, dv, softmax_d, *rest = flash_attn_3_cuda.bwd(
         dout,
         q,
         k,
         v,
         out,
         softmax_lse,
-        dq,
-        dk,
-        dv,
+        None,  # dq - let C++ allocate
+        None,  # dk - let C++ allocate
+        None,  # dv - let C++ allocate
         cu_seqlens_q,
         cu_seqlens_k,
         sequed_q,
@@ -289,7 +286,7 @@ def _flash_attn_backward(
         deterministic,
         sm_margin,
     )
-    return softmax_d
+    return dq, dk, dv, softmax_d
 
 
 @torch.library.register_fake("flash_attn_3::_flash_attn_backward")
@@ -306,9 +303,6 @@ def _flash_attn_backward_fake(
     sequed_k: Optional[torch.Tensor] = None,
     max_seqlen_q: Optional[int] = None,
     max_seqlen_k: Optional[int] = None,
-    dq: Optional[torch.Tensor] = None,
-    dk: Optional[torch.Tensor] = None,
-    dv: Optional[torch.Tensor] = None,
     softmax_scale: Optional[float] = None,
     is_causal: bool = False,
     window_size_left: int = -1,
@@ -316,7 +310,7 @@ def _flash_attn_backward_fake(
     softcap: float = 0.0,
     deterministic: bool = False,
     sm_margin: int = 0,
-) -> torch.Tensor:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
 
     is_varlen_q = cu_seqlens_q is not None
     is_varlen_k = cu_seqlens_q is not None
@@ -373,16 +367,17 @@ def _flash_attn_backward_fake(
 
     total_q_padded_rounded = round_multiple(total_q + batch_size * kBlockM, kBlockM)
 
-    dq = torch.empty_like(q) if dq is None else dq
-    dk = torch.empty_like(k) if dk is None else dk 
-    dv = torch.empty_like(v) if dv is None else dv
+    # Allocate gradient tensors
+    dq = torch.empty_like(q)
+    dk = torch.empty_like(k)
+    dv = torch.empty_like(v)
 
     if not is_varlen:
         softmax_d = torch.empty((batch_size, num_heads, seqlen_q_rounded), dtype=torch.float32, device=q.device)
     else:
         softmax_d = torch.empty((num_heads, total_q_padded_rounded), dtype=torch.float32, device=q.device)
 
-    return softmax_d
+    return dq, dk, dv, softmax_d
 
 
 def setup_context(ctx, inputs, output):
@@ -399,8 +394,7 @@ def setup_context(ctx, inputs, output):
     
 def _backward(ctx, dout, *grads):
     q, k, v, out, softmax_lse = ctx.saved_tensors
-    dq, dk, dv = torch.empty_like(q), torch.empty_like(k), torch.empty_like(v)
-    _flash_attn_backward(
+    dq, dk, dv, _ = _flash_attn_backward(
         dout,
         q,
         k,
@@ -410,9 +404,6 @@ def _backward(ctx, dout, *grads):
         None, None, # cu_seqlens_q, cu_seqlens_k,
         None, None, # sequed_q, sequed_k,
         None, None, # max_seqlen_q, max_seqlen_k,
-        dq,
-        dk,
-        dv,
         ctx.softmax_scale,
         ctx.causal,
         ctx.window_size[0],
@@ -492,17 +483,8 @@ class FlashAttnQKVPackedFunc(torch.autograd.Function):
     def backward(ctx, dout, *args):
         q, k, v, out, softmax_lse = ctx.saved_tensors
         assert ctx.attention_chunk == 0, "FA3 backward does not support attention_chunk"
-        if ctx.ndim == 5:
-            qkv_shape = q.shape[:-2] + (3, *q.shape[-2:])
-            dqkv = torch.empty(qkv_shape, dtype=q.dtype, device=q.device)
-            dq, dk, dv = dqkv.unbind(dim=-3)
-        else:
-            num_heads_q = q.shape[2]
-            num_heads_k = k.shape[2]
-            qkv_shape = q.shape[:-2] + (num_heads_q + num_heads_k * 2, *q.shape[-1:])
-            dqkv = torch.empty(qkv_shape, dtype=q.dtype, device=q.device)
-            dq, dk, dv = dqkv.split([num_heads_q, num_heads_k, num_heads_k], dim=-2)
-        _flash_attn_backward(
+        # Get gradients from the backward function
+        dq, dk, dv, _ = _flash_attn_backward(
             dout,
             q,
             k,
@@ -512,9 +494,6 @@ class FlashAttnQKVPackedFunc(torch.autograd.Function):
             None, None, # cu_seqlens_q, cu_seqlens_k,
             None, None, # sequed_q, sequed_k,
             None, None, # max_seqlen_q, max_seqlen_k,
-            dq,
-            dk,
-            dv,
             ctx.softmax_scale,
             ctx.causal,
             ctx.window_size[0],
@@ -523,6 +502,12 @@ class FlashAttnQKVPackedFunc(torch.autograd.Function):
             ctx.deterministic,
             ctx.sm_margin,
         )
+        # Pack the gradients into the expected format
+        if ctx.ndim == 5:
+            dqkv = torch.stack([dq, dk, dv], dim=-3)
+        else:
+            # Concatenate along the heads dimension
+            dqkv = torch.cat([dq, dk, dv], dim=-2)
         dqkv = dqkv[..., : dout.shape[-1]]  # We could have padded the head dimension
         return dqkv, None, None, None, None, None, None, None, None, None, None, None
 
@@ -589,8 +574,7 @@ class FlashAttnFunc(torch.autograd.Function):
     def backward(ctx, dout, *args):
         q, k, v, out, softmax_lse = ctx.saved_tensors
         assert ctx.attention_chunk == 0, "FA3 backward does not support attention_chunk"
-        dq, dk, dv = torch.empty_like(q), torch.empty_like(k), torch.empty_like(v)
-        _flash_attn_backward(
+        dq, dk, dv, _ = _flash_attn_backward(
             dout,
             q,
             k,
@@ -600,9 +584,6 @@ class FlashAttnFunc(torch.autograd.Function):
             None, None, # cu_seqlens_q, cu_seqlens_k,
             None, None, # sequed_q, sequed_k,
             None, None, # max_seqlen_q, max_seqlen_k,
-            dq,
-            dk,
-            dv,
             ctx.softmax_scale,
             ctx.causal,
             ctx.window_size[0],
@@ -691,8 +672,7 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
     def backward(ctx, dout, *args):
         q, k, v, out, softmax_lse, cu_seqlens_q, cu_seqlens_k, seqused_q, seqused_k = ctx.saved_tensors
         assert ctx.attention_chunk == 0, "FA3 backward does not support attention_chunk"
-        dq, dk, dv = torch.empty_like(q), torch.empty_like(k), torch.empty_like(v)
-        _flash_attn_backward(
+        dq, dk, dv, _ = _flash_attn_backward(
             dout,
             q,
             k,
@@ -705,9 +685,6 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
             seqused_k,
             ctx.max_seqlen_q,
             ctx.max_seqlen_k,
-            dq,
-            dk,
-            dv,
             ctx.softmax_scale,
             ctx.causal,
             ctx.window_size[0],
