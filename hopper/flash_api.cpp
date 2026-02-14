@@ -6,6 +6,7 @@
 #include <torch/nn/functional/padding.h>
 #include <ATen/cuda/CUDAContextLight.h>
 #include <c10/cuda/CUDAGuard.h>
+#include <cuda_runtime.h>
 
 #include <cutlass/numeric_types.h>
 
@@ -1178,8 +1179,8 @@ mha_fwd(at::Tensor q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seql
             // This will zero out the semaphore if needed
             run_mha_fwd_combine(params, stream, true /*enable_pdl*/);
         } else if (scheduler_needs_semaphore && params.skip_scheduler_metadata_computation) {
-            // need to zero out the semaphore in this case
-            tile_count_semaphore.index({torch::indexing::Slice(params.tile_count_semaphore_offset, params.tile_count_semaphore_offset + 1)}).zero_();
+            // need to zero out the semaphore in this case without launching a tensor indexing op
+            CHECK_CUDA(cudaMemsetAsync(params.tile_count_semaphore, 0, sizeof(int), stream));
         }
     } else if (total_q > 0 && num_heads_k > 0) {
         // If seqlen_k == 0, then we have an empty tensor. We need to set the output to 0.

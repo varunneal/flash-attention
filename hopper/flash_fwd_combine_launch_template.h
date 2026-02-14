@@ -6,6 +6,8 @@
 
 #include "cute/tensor.hpp"
 
+#include <mutex>
+
 #include "cutlass/cutlass.h"
 #include "cutlass/arch/arch.h"  // For cutlass::arch::Sm80
 #include "cutlass/device_kernel.h"  // For device_kernel
@@ -45,7 +47,10 @@ void run_flash_fwd_combine(Flash_fwd_params &params, cudaStream_t stream, bool e
     auto kernel = cutlass::device_kernel<CombineKernel>;
     int smem_size = CombineKernel::SharedStorageSize;
     if (smem_size >= 48 * 1024) {
-        CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
+        static std::once_flag smem_attr_once;
+        std::call_once(smem_attr_once, [&] {
+            CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
+        });
     }
     // kernel<<<grid_m, CombineKernel::MaxThreadsPerBlock, smem_size, stream>>>(kernel_params);
     cutlass::kernel_launch<CombineKernel>(grid_m, CombineKernel::MaxThreadsPerBlock, smem_size, stream, kernel_params, Arch >= 90 && enable_pdl /*launch_with_pdl*/);

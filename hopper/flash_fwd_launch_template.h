@@ -6,6 +6,8 @@
 
 #include "cute/tensor.hpp"
 
+#include <mutex>
+
 #include "cutlass/cutlass.h"
 #include "cutlass/device_kernel.h"  // For device_kernel
 #include <cutlass/kernel_hardware_info.h>
@@ -181,7 +183,10 @@ void run_flash_fwd(Flash_fwd_params &params, cudaStream_t stream) {
     if constexpr (size(ClusterShape{}) > 1) {
         void const* kernel = (void const*) cutlass::device_kernel<AttnKernel>;
         if (smem_size >= 48 * 1024) {
-            CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
+            static std::once_flag smem_attr_once;
+            std::call_once(smem_attr_once, [&] {
+                CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
+            });
         }
         dim3 cluster_dims(size<0>(ClusterShape{}), size<1>(ClusterShape{}), size<2>(ClusterShape{}));
         cutlass::ClusterLaunchParams launch_params{grid_dims, block_dims, cluster_dims, smem_size, stream};
@@ -189,7 +194,10 @@ void run_flash_fwd(Flash_fwd_params &params, cudaStream_t stream) {
     } else {
         auto kernel = cutlass::device_kernel<AttnKernel>;
         if (smem_size >= 48 * 1024) {
-            CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
+            static std::once_flag smem_attr_once;
+            std::call_once(smem_attr_once, [&] {
+                CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
+            });
         }
         // kernel<<<grid_dims, block_dims, smem_size, stream>>>(kernel_params);
         cutlass::kernel_launch<AttnKernel>(grid_dims, block_dims, smem_size, stream, kernel_params,
